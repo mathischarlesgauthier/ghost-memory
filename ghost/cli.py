@@ -293,5 +293,141 @@ def distill(
         console.print(line, style=style, highlight=False)
 
 
+def _set_status(db: Path, candidate_id: int, status: str) -> None:
+    conn = connect(db)
+    try:
+        cur = conn.execute(
+            "UPDATE candidates SET status = ? WHERE id = ?", (status, candidate_id)
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            console.print(f"[red]candidat {candidate_id} introuvable[/red]")
+            raise typer.Exit(1)
+        console.print(f"candidat {candidate_id} → [bold]{status}[/bold]")
+    finally:
+        conn.close()
+
+
+@app.command()
+def keep(candidate_id: int, db: DbOpt = DEFAULT_DB) -> None:
+    """Valide un candidat (déployable via ghost deploy)."""
+    _set_status(db, candidate_id, "kept")
+
+
+@app.command()
+def reject(candidate_id: int, db: DbOpt = DEFAULT_DB) -> None:
+    """Rejette un candidat (survit aux re-scans, jamais re-proposé)."""
+    _set_status(db, candidate_id, "rejected")
+
+
+@app.command()
+def skills(db: DbOpt = DEFAULT_DB) -> None:
+    """Liste les skills distillés : verdict, coût, statut, déploiement."""
+    conn = connect(db)
+    rows = conn.execute(
+        """
+        SELECT sk.id, sk.candidate_id, COALESCE(sk.slug, '—'), sk.verdict,
+               sk.low_value, sk.cost_usd, c.status,
+               (SELECT COUNT(*) FROM deployments d WHERE d.skill_id = sk.id)
+        FROM skills sk LEFT JOIN candidates c ON c.id = sk.candidate_id
+        ORDER BY sk.id
+        """
+    ).fetchall()
+    table = Table(title="Skills distillés")
+    for col in ("id", "candidat", "slug", "verdict", "coût", "statut", "déployé"):
+        table.add_column(col)
+    for sid, cid, slug, verdict, low_value, cost, status, n_dep in rows:
+        verdict_s = f"{verdict}{' ⚠low_value' if low_value else ''}"
+        table.add_row(
+            str(sid), str(cid), str(slug), verdict_s, f"{cost:.3f}$",
+            str(status or "?"), "oui" if n_dep else "non",
+        )
+    console.print(table)
+    conn.close()
+
+
+@app.command()
+def deploy(
+    db: DbOpt = DEFAULT_DB,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Montre sans écrire.")] = False,
+    include_low_value: Annotated[
+        bool, typer.Option("--include-low-value", help="Déploie aussi les low_value.")
+    ] = False,
+    force_global: Annotated[
+        list[str] | None,
+        typer.Option("--force-global", help="Slug à déployer en global (répétable)."),
+    ] = None,
+) -> None:
+    """Déploie les skills des candidats `kept` vers Claude Code."""
+    from ghost.deploy import apply_deploy, plan_deploy
+
+    conn = connect(db)
+    try:
+        actions = plan_deploy(
+            conn,
+            include_low_value=include_low_value,
+            force_global=frozenset(force_global or []),
+        )
+        if not actions:
+            console.print(
+                "rien à déployer — valide d'abord des candidats avec `ghost keep <id>`"
+            )
+            return
+        for action in actions:
+            console.print(
+                f"  {action.slug} → {action.target_dir} [{action.scope}]"
+                + (" ⚠low_value" if action.low_value else "")
+            )
+        if dry_run:
+            console.print("\n(dry-run : rien écrit)")
+            return
+        apply_deploy(conn, actions)
+        console.print(f"\n[bold]{len(actions)}[/bold] skill(s) déployé(s)")
+    finally:
+        conn.close()
+
+
+@app.command()
+def run(
+    db: DbOpt = DEFAULT_DB,
+    root: RootOpt = DEFAULT_ROOT,
+    budget: Annotated[float, typer.Option(help="Plafond de dépense ($) du run.")] = 2.0,
+    top: Annotated[int, typer.Option(help="Nb max de nouveaux candidats distillés.")] = 10,
+) -> None:
+    """Boucle complète : ingest → scan → distille les nouveaux candidats."""
+    import anthropic as _anthropic
+
+    from ghost.distill import default_caller
+    from ghost.pipeline import run_pipeline
+
+    conn = connect(db)
+    try:
+        report = run_pipeline(
+            conn, caller=default_caller(_anthropic.Anthropic()),
+            root=root, budget_usd=budget, top_n=top,
+        )
+    finally:
+        conn.close()
+
+    console.print(
+        f"\n[bold]ghost run[/bold] — {report.n_files_ingested} fichiers ingérés "
+        f"({report.n_files_unchanged} inchangés) · {report.n_candidates_total} candidats · "
+        f"dépense {report.spent_usd:.2f}$ / {budget:.2f}$\n"
+    )
+    for item in report.items:
+        line = f"  {item.candidate_id:5d} [{item.kind}] {item.signature[:60]}"
+        if item.outcome == "SKILL":
+            console.print(f"{line}\n        → SKILL {item.slug} ({item.cost_usd:.3f}$)")
+        elif item.outcome == "SKIP":
+            console.print(f"{line}\n        → SKIP ({item.cost_usd:.3f}$)")
+        elif item.outcome == "BUDGET":
+            console.print(f"{line}\n        → non distillé (budget épuisé)")
+        else:
+            console.print(f"{line}\n        → [red]ERREUR[/red] {item.error}")
+    console.print(
+        "\nTriage : `ghost skills` puis `ghost keep <candidat>` et `ghost deploy`."
+    )
+
+
 def main() -> None:
     app()

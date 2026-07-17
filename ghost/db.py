@@ -102,6 +102,13 @@ CREATE TABLE IF NOT EXISTS skills (
     created_at     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS deployments (
+    skill_id    INTEGER NOT NULL,
+    target_path TEXT NOT NULL,
+    deployed_at TEXT NOT NULL,
+    UNIQUE(skill_id, target_path)
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_tool_name   ON events(tool_name);
 CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id);
