@@ -150,6 +150,14 @@ def scan(db: DbOpt = DEFAULT_DB) -> None:
     from ghost.scan import run_scan
 
     conn = connect(db)
+    n_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    if n_events == 0:
+        conn.close()
+        console.print(
+            "base vide — lance d'abord `ghost ingest` (puis `ghost doctor` en cas "
+            "de doute sur ton historique Claude Code)."
+        )
+        return
     merged = run_scan(conn)
     by_kind = {k: sum(1 for c in merged if c.kind == k) for k in
                ("FAILURE_LOOP", "HUMAN_OVERRIDE", "REPEATED_SEQUENCE")}
@@ -627,6 +635,194 @@ def validate(
         raise typer.Exit(1) from exc
     finally:
         conn.close()
+
+
+@app.command()
+def doctor(root: RootOpt = DEFAULT_ROOT, db: DbOpt = DEFAULT_DB) -> None:
+    """Diagnostic d'installation — chaque ✗ dit quoi faire."""
+    from ghost.doctor import run_doctor
+
+    checks = run_doctor(root, db)
+    for check in checks:
+        mark = "[green]✓[/green]" if check.ok else "[red]✗[/red]"
+        console.print(f"{mark} {check.label} — {check.detail}", highlight=False)
+        if not check.ok and check.fix:
+            console.print(f"    [yellow]→ {check.fix}[/yellow]", highlight=False)
+    n_ok = sum(1 for c in checks if c.ok)
+    console.print(f"\n{n_ok}/{len(checks)} vérifications OK")
+    if n_ok < len(checks):
+        raise typer.Exit(1)
+
+
+@app.command()
+def why(db: DbOpt = DEFAULT_DB) -> None:
+    """Quels skills Ghost étaient injectables au dernier prompt, et pourquoi."""
+    from ghost.manage import why_last
+
+    conn = connect(db)
+    try:
+        session_id, injected = why_last(conn)
+    finally:
+        conn.close()
+    if session_id is None:
+        console.print("aucune session en base — lance `ghost ingest`.")
+        return
+    console.print(f"dernière session : {session_id[:8]}…")
+    if not injected:
+        console.print("aucun skill Ghost déployé n'était disponible dans cette session.")
+        return
+    console.print("skills Ghost injectables (déclenchés par leur description) :")
+    for skill in injected:
+        tag = f"#{skill.skill_id}" if skill.skill_id is not None else "?"
+        console.print(f"  [bold]{skill.slug}[/bold] ({tag}) — {skill.description}",
+                      highlight=False)
+    console.print("\n`ghost disable <id>` pour qu'un skill ne soit plus injecté.")
+
+
+@app.command()
+def disable(skill_id: int, db: DbOpt = DEFAULT_DB) -> None:
+    """Retire un skill déployé — plus jamais injecté (réactivable via enable)."""
+    from ghost.manage import disable_skill
+
+    conn = connect(db)
+    try:
+        removed, refused = disable_skill(conn, skill_id)
+    finally:
+        conn.close()
+    console.print(f"skill {skill_id} désactivé · {len(removed)} fichier(s) retiré(s)")
+    for path in removed:
+        console.print(f"  - {path}")
+    for path in refused:
+        console.print(f"  [yellow]⚠ non retiré (hors ~/.claude/skills/) : {path}[/yellow]")
+    console.print("`ghost enable <id>` pour réactiver.")
+
+
+@app.command()
+def enable(skill_id: int, db: DbOpt = DEFAULT_DB) -> None:
+    """Réactive un skill désactivé (redéployable via ghost deploy)."""
+    from ghost.manage import enable_skill
+
+    conn = connect(db)
+    try:
+        enable_skill(conn, skill_id)
+    finally:
+        conn.close()
+    console.print(f"skill {skill_id} réactivé — `ghost deploy` pour le repousser.")
+
+
+@app.command()
+def uninstall(
+    db: DbOpt = DEFAULT_DB,
+    yes: Annotated[bool, typer.Option("--yes", help="Sans confirmation.")] = False,
+) -> None:
+    """Retire tous les skills déployés par Ghost Brain (aucun hook installé)."""
+    from ghost.manage import uninstall_skills
+
+    if not yes and not typer.confirm(
+        "Retirer tous les SKILL.md déployés par Ghost Brain ?", default=False
+    ):
+        raise typer.Exit(0)
+    conn = connect(db)
+    try:
+        removed, refused = uninstall_skills(conn)
+    finally:
+        conn.close()
+    console.print(f"{len(removed)} fichier(s) retiré(s).")
+    for path in refused:
+        console.print(f"  [yellow]⚠ non retiré (hors ~/.claude/skills/) : {path}[/yellow]")
+    console.print(
+        "Ghost Brain n'installe aucun hook dans settings.json — rien d'autre à "
+        "nettoyer. La base ~/.ghost/ et le paquet restent (supprime-les à la main "
+        "si tu le souhaites)."
+    )
+
+
+telemetry_app = typer.Typer(help="Télémétrie opt-in (off par défaut).")
+app.add_typer(telemetry_app, name="telemetry")
+
+
+@telemetry_app.command("status")
+def telemetry_status() -> None:
+    """État de la télémétrie."""
+    from ghost.telemetry import TelemetryConfig
+
+    cfg = TelemetryConfig.load()
+    console.print(
+        f"télémétrie : [bold]{'activée' if cfg.enabled else 'désactivée'}[/bold]\n"
+        f"endpoint : {cfg.endpoint or '—'}\n"
+        f"install_id : {cfg.install_id or '—'}"
+    )
+
+
+@telemetry_app.command("on")
+def telemetry_on(endpoint: str) -> None:
+    """Active la télémétrie vers <endpoint> (opt-in explicite)."""
+    from ghost.telemetry import TelemetryConfig
+
+    if not endpoint.startswith(("http://", "https://")):
+        console.print("[red]endpoint invalide (http:// ou https:// requis)[/red]")
+        raise typer.Exit(1)
+    cfg = TelemetryConfig.load()
+    cfg.enabled = True
+    cfg.endpoint = endpoint
+    cfg.save()
+    console.print(
+        f"télémétrie activée vers {endpoint}. `ghost telemetry preview` montre "
+        "exactement ce qui serait envoyé ; `ghost telemetry off` à tout moment."
+    )
+
+
+@telemetry_app.command("off")
+def telemetry_off() -> None:
+    """Désactive la télémétrie."""
+    from ghost.telemetry import TelemetryConfig
+
+    cfg = TelemetryConfig.load()
+    cfg.enabled = False
+    cfg.save()
+    console.print("télémétrie désactivée.")
+
+
+@telemetry_app.command("preview")
+def telemetry_preview(db: DbOpt = DEFAULT_DB) -> None:
+    """Affiche le payload EXACT (comptes only, aucun texte brut) sans l'envoyer."""
+    import json as _json
+
+    from ghost import __version__
+    from ghost.telemetry import TelemetryConfig, build_payload
+
+    conn = connect(db)
+    try:
+        payload = build_payload(conn, TelemetryConfig.load(), __version__)
+    finally:
+        conn.close()
+    console.print("[bold]payload télémétrie (jamais envoyé sans opt-in)[/bold] :")
+    console.print(_json.dumps(payload.to_dict(), indent=2, ensure_ascii=False))
+    console.print(
+        "\nAucun prompt, code, chemin, nom de fichier ni contenu de skill n'y "
+        "figure — uniquement des comptes agrégés."
+    )
+
+
+@telemetry_app.command("send")
+def telemetry_send(db: DbOpt = DEFAULT_DB) -> None:
+    """Envoie le payload maintenant (nécessite telemetry on)."""
+    from ghost import __version__
+    from ghost.telemetry import TelemetryConfig, build_payload, send
+
+    cfg = TelemetryConfig.load()
+    if not cfg.enabled or not cfg.endpoint:
+        console.print("télémétrie désactivée — `ghost telemetry on <url>` d'abord.")
+        raise typer.Exit(1)
+    conn = connect(db)
+    try:
+        payload = build_payload(conn, cfg, __version__)
+    finally:
+        conn.close()
+    ok, detail = send(payload, cfg.endpoint)
+    console.print(f"{'envoyé' if ok else 'échec'} : {detail}")
+    if not ok:
+        raise typer.Exit(1)
 
 
 def main() -> None:

@@ -72,7 +72,7 @@ def plan_deploy(
         FROM skills sk
         JOIN candidates c ON c.id = sk.candidate_id
         WHERE sk.verdict = 'SKILL' AND sk.path IS NOT NULL
-          AND c.status = 'kept'
+          AND c.status = 'kept' AND sk.disabled = 0
           AND sk.id = (SELECT MAX(s2.id) FROM skills s2
                        WHERE s2.candidate_id = sk.candidate_id AND s2.verdict = 'SKILL')
         ORDER BY sk.candidate_id

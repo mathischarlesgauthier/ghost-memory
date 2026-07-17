@@ -188,6 +188,12 @@ def run_replay(
     model: str = REPLAY_MODEL,
     timeout_s: int = RUN_TIMEOUT_S,
 ) -> RunMetrics:
+    if not hasattr(os, "killpg") or not hasattr(os, "getpgid"):
+        raise ReplayError(
+            "ghost validate exige un système POSIX (macOS/Linux/WSL) pour isoler "
+            "et tuer proprement les processus de replay. Sur Windows natif, utilise "
+            "WSL. Les autres commandes (ingest/scan/distill/deploy) fonctionnent."
+        )
     api_key = API_KEY_FILE.read_text(encoding="utf-8").strip()
     cfg = Path(tempfile.mkdtemp(prefix="ghost-replay-cfg-"))
     try:

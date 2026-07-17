@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS skills (
     prompt_version TEXT NOT NULL,
     verdict        TEXT NOT NULL,
     low_value      INTEGER NOT NULL DEFAULT 0,
+    disabled       INTEGER NOT NULL DEFAULT 0,
     skip_reason    TEXT,
     critique_line  TEXT,
     tokens_in      INTEGER NOT NULL DEFAULT 0,
@@ -161,6 +162,10 @@ def connect(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
         ("usage_out", columns, "ALTER TABLE events ADD COLUMN usage_out INTEGER"),
         ("msg_id", columns, "ALTER TABLE events ADD COLUMN msg_id TEXT"),
         ("lift_json", skills_columns, "ALTER TABLE skills ADD COLUMN lift_json TEXT"),
+        (
+            "disabled", skills_columns,
+            "ALTER TABLE skills ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+        ),
     ):
         if column not in present:
             conn.execute(ddl)
