@@ -1,7 +1,7 @@
 [project]
-name = "ghost-brain"
+name = "ghost-memory"
 version = "0.1.0"
-description = "Ghost Brain — extraction de skills réutilisables depuis l'historique Claude Code"
+description = "Ghost Memory — extraction de skills réutilisables depuis l'historique Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

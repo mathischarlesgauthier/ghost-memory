@@ -1,7 +1,7 @@
 """Transparence et kill switch — le mode d'échec n°1 est l'injection
 silencieuse qui dégrade l'agent sans retour possible.
 
-Ghost Brain n'installe AUCUN hook dans settings.json : `ghost deploy` place
+Ghost Memory n'installe AUCUN hook dans settings.json : `ghost deploy` place
 des SKILL.md que Claude Code découvre nativement dans ~/.claude/skills/ et
 <projet>/.claude/skills/. Désactiver = retirer le fichier déployé (Claude Code
 cesse de le charger) et marquer le skill pour que `ghost deploy` ne le
@@ -128,8 +128,8 @@ def enable_skill(conn: sqlite3.Connection, skill_id: int) -> None:
 
 
 def uninstall_skills(conn: sqlite3.Connection) -> tuple[list[Path], list[Path]]:
-    """Retire TOUS les SKILL.md déployés par Ghost Brain (aucun hook à
-    retirer : Ghost Brain n'en installe pas). Ne marque disabled QUE les
+    """Retire TOUS les SKILL.md déployés par Ghost Memory (aucun hook à
+    retirer : Ghost Memory n'en installe pas). Ne marque disabled QUE les
     skills qui avaient un déploiement (pas ceux jamais déployés)."""
     paths = _deployed_paths(conn)
     removed, refused = _remove_deployed(paths)

@@ -1,15 +1,17 @@
-# Ghost Brain
+# Ghost Memory
 
 Ce que Claude fait bien du premier coup est générique et sans valeur. Ce qui
-t'a coûté des échecs est propriétaire. Ghost Brain fouille ton historique
+t'a coûté des échecs est propriétaire. Ghost Memory fouille ton historique
 Claude Code, en extrait les **cicatrices** — boucles d'échec, corrections
 humaines, séquences répétées — et les distille en skills réutilisables,
 rechargés dans Claude Code. Personne d'autre n'a tes traces.
 
 ## Installer
 
+Ghost Memory n'est pas (encore) sur PyPI — installe depuis GitHub :
+
 ```bash
-uv tool install ghost-brain
+uv tool install git+https://github.com/<user>/ghost-memory
 ```
 
 ## Trois commandes
@@ -34,7 +36,7 @@ sous plafond de dépense).
 
 ## Transparence et contrôle
 
-Ghost Brain **n'installe aucun hook** : `ghost deploy` place des `SKILL.md` que
+Ghost Memory **n'installe aucun hook** : `ghost deploy` place des `SKILL.md` que
 Claude Code découvre nativement. Rien n'est silencieux.
 
 ```bash
@@ -43,7 +45,7 @@ ghost disable <id>  # un skill n'est plus jamais injecté
 ghost uninstall     # retire tous les skills déployés
 ```
 
-## Mesure (ce qui distingue Ghost Brain d'un catalogue)
+## Mesure (ce qui distingue Ghost Memory d'un catalogue)
 
 ```bash
 ghost watch            # signal précoce : sessions exposées vs baseline (0 inférence)

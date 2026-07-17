@@ -1,4 +1,4 @@
-"""CLI Ghost Brain : `ghost ingest`, `ghost stats`, `ghost scan`, `ghost show`."""
+"""CLI Ghost Memory : `ghost ingest`, `ghost stats`, `ghost scan`, `ghost show`."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from rich.table import Table
 from ghost.db import DEFAULT_DB, connect
 from ghost.ingest import DEFAULT_ROOT, Summary, ingest_all, scan_files
 
-app = typer.Typer(add_completion=False, help="Ghost Brain — historique Claude Code → SQLite.")
+app = typer.Typer(add_completion=False, help="Ghost Memory — historique Claude Code → SQLite.")
 console = Console()
 
 RootOpt = Annotated[Path, typer.Option(help="Racine des projets Claude Code.")]
@@ -715,11 +715,11 @@ def uninstall(
     db: DbOpt = DEFAULT_DB,
     yes: Annotated[bool, typer.Option("--yes", help="Sans confirmation.")] = False,
 ) -> None:
-    """Retire tous les skills déployés par Ghost Brain (aucun hook installé)."""
+    """Retire tous les skills déployés par Ghost Memory (aucun hook installé)."""
     from ghost.manage import uninstall_skills
 
     if not yes and not typer.confirm(
-        "Retirer tous les SKILL.md déployés par Ghost Brain ?", default=False
+        "Retirer tous les SKILL.md déployés par Ghost Memory ?", default=False
     ):
         raise typer.Exit(0)
     conn = connect(db)
@@ -731,7 +731,7 @@ def uninstall(
     for path in refused:
         console.print(f"  [yellow]⚠ non retiré (hors ~/.claude/skills/) : {path}[/yellow]")
     console.print(
-        "Ghost Brain n'installe aucun hook dans settings.json — rien d'autre à "
+        "Ghost Memory n'installe aucun hook dans settings.json — rien d'autre à "
         "nettoyer. La base ~/.ghost/ et le paquet restent (supprime-les à la main "
         "si tu le souhaites)."
     )
