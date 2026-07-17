@@ -1,7 +1,8 @@
-"""CLI Ghost Brain : `ghost ingest`, `ghost stats`."""
+"""CLI Ghost Brain : `ghost ingest`, `ghost stats`, `ghost scan`, `ghost show`."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Annotated
 
@@ -31,7 +32,7 @@ def ingest(root: RootOpt = DEFAULT_ROOT, db: DbOpt = DEFAULT_DB) -> None:
     """Ingère ~/.claude/projects/**/*.jsonl (idempotent, streaming)."""
     conn = connect(db)
     files = scan_files(root)
-    summary = Summary(n_files=len(files), failures=[])
+    summary = Summary(n_files=len(files))
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -46,32 +47,21 @@ def ingest(root: RootOpt = DEFAULT_ROOT, db: DbOpt = DEFAULT_DB) -> None:
                 summary.n_unchanged += 1
             elif result.status == "failed":
                 summary.n_failed += 1
-                assert summary.failures is not None
                 summary.failures.append((str(source.path), result.error or "?"))
             else:
                 summary.n_ingested += 1
                 summary.n_events += result.n_events
                 summary.n_skipped_lines += result.n_skipped_lines
-    conn.close()
-
-    for path, error in summary.failures or []:
+    for path, error in summary.failures:
         console.print(f"[yellow]⚠ fichier en échec :[/yellow] {path} — {error}")
-    n_sessions = _count(db, "SELECT COUNT(*) FROM sessions")
-    n_events_total = _count(db, "SELECT COUNT(*) FROM events")
+    n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    n_events_total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    conn.close()
     console.print(
         f"\n[bold]{n_sessions}[/bold] sessions · [bold]{n_events_total}[/bold] events en base — "
         f"ce run : {summary.n_ingested} fichiers ingérés, {summary.n_unchanged} inchangés, "
         f"{summary.n_failed} en échec, {summary.n_skipped_lines} lignes corrompues sautées"
     )
-
-
-def _count(db: Path, sql: str) -> int:
-    conn = connect(db)
-    try:
-        row = conn.execute(sql).fetchone()
-        return int(row[0]) if row is not None and row[0] is not None else 0
-    finally:
-        conn.close()
 
 
 @app.command()
@@ -115,6 +105,120 @@ def stats(db: DbOpt = DEFAULT_DB) -> None:
         table.add_row(str(tool_name), str(n_use), str(n_err), rate)
     console.print(table)
     conn.close()
+
+
+@app.command()
+def scan(db: DbOpt = DEFAULT_DB) -> None:
+    """Détecte les cicatrices (FAILURE_LOOP, HUMAN_OVERRIDE, REPEATED_SEQUENCE)."""
+    import json as _json
+
+    from ghost.scan import run_scan
+
+    conn = connect(db)
+    merged = run_scan(conn)
+    by_kind = {k: sum(1 for c in merged if c.kind == k) for k in
+               ("FAILURE_LOOP", "HUMAN_OVERRIDE", "REPEATED_SEQUENCE")}
+    console.print(
+        f"\n[bold]{len(merged)}[/bold] candidats · "
+        f"{by_kind['FAILURE_LOOP']} boucles d'échec · "
+        f"{by_kind['HUMAN_OVERRIDE']} corrections · "
+        f"{by_kind['REPEATED_SEQUENCE']} répétitions\n"
+    )
+    rows = conn.execute(
+        "SELECT id, kind, signature, score, n_occ, n_sessions, evidence_json, status "
+        "FROM candidates ORDER BY score DESC LIMIT 15"
+    ).fetchall()
+    for cid, kind, signature, score, n_occ, n_sessions, evidence_json, status in rows:
+        label = signature
+        if kind == "HUMAN_OVERRIDE":
+            evidence = _json.loads(evidence_json)
+            excerpt = str(evidence[0].get("meta", {}).get("excerpt", "")) if evidence else ""
+            label = f"{signature}  «{excerpt[:70]}»"
+        flag = "" if status == "new" else f" [{status}]"
+        console.print(
+            f"  [bold]{cid:4d}[/bold]. [{kind}] {label[:96]}\n"
+            f"        score {score:.1f} · {n_occ} occ · {n_sessions} sess{flag}"
+        )
+    total = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    console.print(f"\n  top {min(15, int(total))} affichés · {total} candidats en table")
+    conn.close()
+
+
+@app.command()
+def show(
+    candidate_id: int,
+    db: DbOpt = DEFAULT_DB,
+    max_occurrences: Annotated[int, typer.Option(help="Occurrences affichées.")] = 5,
+) -> None:
+    """Dump l'evidence d'un candidat, events bruts inclus."""
+    import json as _json
+
+    conn = connect(db)
+    row = conn.execute(
+        "SELECT kind, signature, score, n_occ, n_sessions, status, evidence_json "
+        "FROM candidates WHERE id = ?",
+        (candidate_id,),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        console.print(f"[red]candidat {candidate_id} introuvable[/red]")
+        raise typer.Exit(1)
+    kind, signature, score, n_occ, n_sessions, status, evidence_json = row
+    console.print(
+        f"[bold][{kind}][/bold] {signature}\n"
+        f"score {score:.1f} · {n_occ} occ · {n_sessions} sessions · status {status}\n"
+    )
+    for occ in _json.loads(evidence_json)[:max_occurrences]:
+        meta = occ.get("meta", {})
+        console.print(
+            f"[bold]— session {occ['session_id'][:8]}…[/bold] "
+            f"coût {occ.get('cost')} · ground_truth {occ.get('ground_truth')} · {meta}"
+        )
+        for _eid, seq, role, block_type, tool_name, is_error, text, src_file, src_line in (
+            _resolve_evidence(conn, occ)
+        ):
+            mark = " ❌" if is_error else ""
+            head = f"  [{seq}] {role}/{block_type}" + (f" {tool_name}" if tool_name else "") + mark
+            console.print(head)
+            if text:
+                console.print(f"      {str(text)[:600]}")
+            console.print(f"      [dim]{src_file}:{src_line}[/dim]")
+        console.print()
+    conn.close()
+
+
+_EVENT_COLS = "id, seq, role, block_type, tool_name, is_error, text, src_file, src_line"
+
+
+def _resolve_evidence(
+    conn: sqlite3.Connection, occ: dict[str, object]
+) -> list[tuple[object, ...]]:
+    """Résout les events d'une occurrence, par (src_file, src_line) —
+    stables à travers les ré-ingestions — avec repli sur les events.id
+    pour les candidats persistés avant l'ajout des src_refs."""
+    src_refs = occ.get("src_refs")
+    if isinstance(src_refs, list) and src_refs:
+        pairs = [(str(r[0]), int(r[1])) for r in src_refs if isinstance(r, list) and len(r) == 2]
+        rows: list[tuple[object, ...]] = []
+        for start in range(0, len(pairs), 300):
+            chunk = pairs[start : start + 300]
+            clause = " OR ".join("(src_file = ? AND src_line = ?)" for _ in chunk)
+            params = [x for pair in chunk for x in pair]
+            rows.extend(
+                conn.execute(
+                    f"SELECT {_EVENT_COLS} FROM events WHERE {clause} ORDER BY seq", params
+                ).fetchall()
+            )
+        return rows
+    ids = occ.get("event_ids")
+    if not isinstance(ids, list) or not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    return list(
+        conn.execute(
+            f"SELECT {_EVENT_COLS} FROM events WHERE id IN ({placeholders}) ORDER BY seq", ids
+        ).fetchall()
+    )
 
 
 def main() -> None:

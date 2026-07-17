@@ -16,7 +16,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -79,7 +79,7 @@ class Summary:
     n_failed: int = 0
     n_events: int = 0
     n_skipped_lines: int = 0
-    failures: list[tuple[str, str]] | None = None
+    failures: list[tuple[str, str]] = field(default_factory=list)
 
 
 def scan_files(root: Path = DEFAULT_ROOT) -> list[SourceFile]:

@@ -2,8 +2,8 @@
 
 Règles de séparation : les tables brutes (sessions, events, files_touched,
 agents, ingest_log) peuvent être reconstruites par ré-ingestion ; les tables
-dérivées des lots 2/3 (candidates, skills) ne devront jamais être touchées
-par un re-ingest.
+dérivées des lots 2/3 (candidates, skills) ne sont jamais touchées par un
+re-ingest, et le `status` de candidates (triage humain) survit au re-scan.
 """
 
 from __future__ import annotations
@@ -68,6 +68,21 @@ CREATE TABLE IF NOT EXISTS ingest_log (
     mtime       REAL NOT NULL,
     sha         TEXT NOT NULL,
     ingested_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS candidates (
+    id               INTEGER PRIMARY KEY,
+    kind             TEXT NOT NULL,
+    signature        TEXT NOT NULL,
+    score            REAL NOT NULL DEFAULT 0,
+    n_occ            INTEGER NOT NULL DEFAULT 0,
+    n_sessions       INTEGER NOT NULL DEFAULT 0,
+    session_ids_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json    TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'new',
+    created_at       TEXT,
+    last_seen_at     TEXT,
+    UNIQUE(kind, signature)
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
