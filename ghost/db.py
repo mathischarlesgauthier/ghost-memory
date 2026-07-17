@@ -102,7 +102,20 @@ CREATE TABLE IF NOT EXISTS skills (
     tokens_in      INTEGER NOT NULL DEFAULT 0,
     tokens_out     INTEGER NOT NULL DEFAULT 0,
     cost_usd       REAL NOT NULL DEFAULT 0,
+    lift_json      TEXT,
     created_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS replays (
+    id           INTEGER PRIMARY KEY,
+    skill_id     INTEGER NOT NULL,
+    case_id      TEXT NOT NULL,
+    condition    TEXT NOT NULL,
+    run_idx      INTEGER NOT NULL,
+    metrics_json TEXT NOT NULL,
+    cost_usd     REAL NOT NULL DEFAULT 0,
+    created_at   TEXT,
+    UNIQUE(skill_id, case_id, condition, run_idx)
 );
 
 CREATE TABLE IF NOT EXISTS deployments (
@@ -142,14 +155,17 @@ def connect(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     # l'historique reste NULL tant qu'un `ghost ingest --rebuild` n'a pas
     # tourné (l'idempotence mtime/sha saute les fichiers inchangés).
     columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    skills_columns = {row[1] for row in conn.execute("PRAGMA table_info(skills)")}
     migrated = False
-    for column, ddl in (
-        ("usage_out", "ALTER TABLE events ADD COLUMN usage_out INTEGER"),
-        ("msg_id", "ALTER TABLE events ADD COLUMN msg_id TEXT"),
+    for column, present, ddl in (
+        ("usage_out", columns, "ALTER TABLE events ADD COLUMN usage_out INTEGER"),
+        ("msg_id", columns, "ALTER TABLE events ADD COLUMN msg_id TEXT"),
+        ("lift_json", skills_columns, "ALTER TABLE skills ADD COLUMN lift_json TEXT"),
     ):
-        if column not in columns:
+        if column not in present:
             conn.execute(ddl)
-            migrated = True
+            if present is columns:
+                migrated = True
     if migrated:
         print(
             "⚠ schéma migré sans backfill — lance `ghost ingest --rebuild` "

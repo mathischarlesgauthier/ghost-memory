@@ -105,18 +105,23 @@ def plan_deploy(
 
 def convert_for_claude_code(md_text: str) -> str:
     """Réduit le frontmatter à name + description (contrat de déclenchement
-    des skills Claude Code) ; le corps est conservé tel quel."""
+    des skills Claude Code) + la ligne `lift:` mesurée si présente ; le
+    corps est conservé tel quel."""
     match = _FRONTMATTER_RE.match(md_text)
     if not match:
         return md_text
     name = description = ""
+    lift: str | None = None
     for line in match.group(1).splitlines():
         if line.startswith("name:"):
             name = line.removeprefix("name:").strip()
         elif line.startswith("description:"):
             description = line.removeprefix("description:").strip()
+        elif line.startswith("lift:"):
+            lift = line.strip()
     body = md_text[match.end() :]
-    return f"---\nname: {name}\ndescription: {description}\n---\n{body}"
+    lift_part = f"{lift}\n" if lift else ""
+    return f"---\nname: {name}\ndescription: {description}\n{lift_part}---\n{body}"
 
 
 def apply_deploy(conn: sqlite3.Connection, actions: list[DeployAction]) -> None:

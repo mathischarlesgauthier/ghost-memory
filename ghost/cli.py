@@ -484,5 +484,150 @@ def watch(
         console.print("\n" + render_why(report), highlight=False)
 
 
+@app.command()
+def validate(
+    skill_id: int,
+    db: DbOpt = DEFAULT_DB,
+    max_cost: Annotated[float, typer.Option(help="Plafond de dépense ($) du replay.")] = 8.0,
+    runs: Annotated[int, typer.Option(help="Runs par condition et par cas (≥3).")] = 3,
+    match: Annotated[
+        str, typer.Option(help="Matching des cas : strict | souple (fichiers communs).")
+    ] = "strict",
+    max_cases: Annotated[
+        int,
+        typer.Option(help="Limite aux N cas les plus probants (0 = tous)."),
+    ] = 0,
+    run_budget: Annotated[
+        float, typer.Option(help="Plafond --max-budget-usd par run.")
+    ] = 0.60,
+    yes: Annotated[bool, typer.Option("--yes", help="Saute la confirmation.")] = False,
+) -> None:
+    """Valide un skill par replay contrôlé avec/sans (chiffre causal)."""
+    import json as _json
+
+    from ghost.replay import ReplayError
+    from ghost.validate import (
+        EST_COST_PER_RUN,
+        aggregate,
+        eligible_cases,
+        rank_cases_by_motif,
+        run_validation,
+        skill_info,
+        write_lift_frontmatter,
+    )
+
+    conn = connect(db)
+    try:
+        skill = skill_info(conn, skill_id)
+        cases, counts = eligible_cases(conn, skill, match=match)
+        if max_cases > 0 and len(cases) > max_cases:
+            cases = rank_cases_by_motif(conn, skill, cases)[:max_cases]
+            console.print(
+                f"[dim]{max_cases} cas retenus (les plus probants par motif "
+                f"d'erreur du skill)[/dim]"
+            )
+        if len(cases) < 3:
+            console.print(
+                f"[red]{len(cases)} cas éligibles (<3) — refus, conformément au "
+                f"protocole.[/red] Comptes : {counts}"
+            )
+            raise typer.Exit(1)
+        n_runs = len(cases) * 2 * runs
+        estimate = n_runs * EST_COST_PER_RUN
+        console.print(
+            f"Replay [bold]{skill.slug}[/bold] · {len(cases)} cas · "
+            f"{runs} runs/condition · ~{n_runs} runs · est. {estimate:.2f}$ "
+            f"(plafond dur {max_cost:.2f}$)"
+        )
+        if not yes and not typer.confirm("Lancer ?", default=False):
+            raise typer.Exit(0)
+        report = run_validation(
+            conn, skill, cases, max_cost_usd=max_cost, n_per_condition=runs,
+            per_run_budget=run_budget,
+            on_progress=lambda msg: console.print(f"  [dim]{msg}[/dim]"),
+        )
+        for error in report.errors:
+            console.print(f"[yellow]⚠ {error}[/yellow]")
+        if report.stopped_on_budget:
+            console.print("[yellow]arrêt sur plafond de coût — reprise possible "
+                          "en relançant la même commande[/yellow]")
+
+        lift = aggregate(conn, skill_id)
+        console.print(f"\n[bold]— cas ({lift.n_cases} complets) —[/bold]")
+        rows = conn.execute(
+            "SELECT case_id, condition, metrics_json FROM replays "
+            "WHERE skill_id = ? ORDER BY case_id, condition, run_idx",
+            (skill_id,),
+        ).fetchall()
+        by_case: dict[str, dict[str, list[str]]] = {}
+        for case_id, condition, mj in rows:
+            m = _json.loads(mj)
+            mark = "✓" if m.get("success") else "✗"
+            by_case.setdefault(str(case_id), {}).setdefault(str(condition), []).append(
+                f"{m.get('turns', 0)}{mark}"
+            )
+        for case_id, conds in by_case.items():
+            console.print(f"  case {case_id}")
+            for condition in ("sans", "avec"):
+                vals = " / ".join(conds.get(condition, []))
+                console.print(f"    {condition:<5} turns: {vals or '—'}")
+        console.print(
+            f"\n╭─ [bold]{lift.verdict.upper()}[/bold]\n"
+            f"│  succès sans {lift.success_sans[0]}/{lift.success_sans[1]} → "
+            f"avec {lift.success_avec[0]}/{lift.success_avec[1]}\n"
+            f"│  n={lift.n_cases} cas · {lift.n_runs} runs · coût {lift.cost_usd:.2f}$\n"
+            f"╰─ relance la même commande pour vérifier la reproductibilité"
+        )
+        for entry in lift.lifts:
+            pct = f"{entry.delta_pct * 100:+.0f}%" if entry.delta_pct is not None else "—"
+            coherent = "cohérent" if entry.consistent else "signes mixtes"
+            console.print(
+                f"   {entry.metric:<13} sans {entry.baseline_median:.0f} → "
+                f"avec {entry.exposed_median:.0f}  ({pct}, {coherent})"
+            )
+        conn.execute(
+            "UPDATE skills SET lift_json = ? WHERE id = ?",
+            (
+                _json.dumps(
+                    {
+                        "verdict": lift.verdict, "n_cases": lift.n_cases,
+                        "n_runs": lift.n_runs, "cost_usd": lift.cost_usd,
+                        "lifts": {
+                            e.metric: e.delta_pct for e in lift.lifts
+                        },
+                    }
+                ),
+                skill_id,
+            ),
+        )
+        conn.commit()
+        if skill.source.exists():
+            from ghost.deploy import convert_for_claude_code
+
+            write_lift_frontmatter(skill.source, lift)
+            n_propagated = 0
+            for (target,) in conn.execute(
+                "SELECT target_path FROM deployments WHERE skill_id = ?", (skill_id,)
+            ):
+                target_path = Path(str(target))
+                if target_path.exists():
+                    target_path.write_text(
+                        convert_for_claude_code(
+                            skill.source.read_text(encoding="utf-8")
+                        ),
+                        encoding="utf-8",
+                    )
+                    n_propagated += 1
+            console.print(
+                f"\nlift écrit dans {skill.source}, en base, et propagé à "
+                f"{n_propagated} copie(s) déployée(s)"
+            )
+    except ReplayError as exc:
+        console.print(f"[red]échec replay :[/red] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+
 def main() -> None:
     app()
