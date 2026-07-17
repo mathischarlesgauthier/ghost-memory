@@ -521,7 +521,7 @@ def _is_stopgram(key: tuple[str, ...]) -> bool:
 # GROUND_TRUTH
 
 
-_GIT_COMMIT_RE = re.compile(r"\bgit\b[^|;&]*\bcommit\b")
+GIT_COMMIT_RE = re.compile(r"\bgit\b[^|;&]*\bcommit\b")
 
 
 def commit_timestamps(conn: sqlite3.Connection) -> dict[str, list[str]]:
@@ -541,7 +541,7 @@ def commit_timestamps(conn: sqlite3.Connection) -> dict[str, list[str]]:
         """
     ):
         command = _tool_input(payload).get("command")
-        if isinstance(command, str) and _GIT_COMMIT_RE.search(command):
+        if isinstance(command, str) and GIT_COMMIT_RE.search(command):
             out.setdefault(session_id, []).append(ts)
     return out
 

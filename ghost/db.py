@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_DB = Path.home() / ".ghost" / "ghost.db"
 
@@ -45,6 +46,8 @@ CREATE TABLE IF NOT EXISTS events (
     text              TEXT,
     payload_json      TEXT,
     payload_truncated INTEGER NOT NULL DEFAULT 0,
+    usage_out         INTEGER,
+    msg_id            TEXT,
     src_file          TEXT NOT NULL,
     src_line          INTEGER NOT NULL
 );
@@ -134,6 +137,25 @@ def connect(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_DDL)
+    # Migrations additives : CREATE IF NOT EXISTS ne modifie pas une table
+    # existante, les colonnes doivent être ajoutées à la main. Sans backfill :
+    # l'historique reste NULL tant qu'un `ghost ingest --rebuild` n'a pas
+    # tourné (l'idempotence mtime/sha saute les fichiers inchangés).
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    migrated = False
+    for column, ddl in (
+        ("usage_out", "ALTER TABLE events ADD COLUMN usage_out INTEGER"),
+        ("msg_id", "ALTER TABLE events ADD COLUMN msg_id TEXT"),
+    ):
+        if column not in columns:
+            conn.execute(ddl)
+            migrated = True
+    if migrated:
+        print(
+            "⚠ schéma migré sans backfill — lance `ghost ingest --rebuild` "
+            "pour peupler l'historique",
+            file=sys.stderr,
+        )
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
     return conn

@@ -52,6 +52,7 @@ class Block:
     text: str | None = None
     payload_json: str | None = None
     payload_truncated: int = 0
+    usage_out: int | None = None
     paths: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -63,6 +64,7 @@ class LineMeta:
     cwd: str | None = None
     git_branch: str | None = None
     version: str | None = None
+    msg_id: str | None = None
 
 
 def is_human_text(text: str) -> bool:
@@ -112,11 +114,14 @@ def _opt_str(obj: Mapping[str, object], key: str) -> str | None:
 
 
 def line_meta(obj: Mapping[str, object]) -> LineMeta:
+    message = obj.get("message")
+    msg_id = _opt_str(message, "id") if isinstance(message, Mapping) else None
     return LineMeta(
         ts=_opt_str(obj, "timestamp"),
         cwd=_opt_str(obj, "cwd"),
         git_branch=_opt_str(obj, "gitBranch"),
         version=_opt_str(obj, "version"),
+        msg_id=msg_id,
     )
 
 
@@ -166,6 +171,25 @@ def parse_line(obj: Mapping[str, object], *, sidechain: bool) -> list[Block]:
     parent, jamais l'humain.
     """
     line_type = _opt_str(obj, "type")
+    if line_type == "attachment":
+        # Seul le skill_listing nous intéresse : il trace quels skills
+        # étaient DISPONIBLES dans la session (cohortes du lot 5).
+        attachment = obj.get("attachment")
+        if (
+            isinstance(attachment, Mapping)
+            and attachment.get("type") == "skill_listing"
+            and isinstance(attachment.get("content"), str)
+        ):
+            text, truncated = _truncate(str(attachment["content"]))
+            return [
+                Block(
+                    role="system",
+                    block_type="skill_listing",
+                    text=text,
+                    payload_truncated=truncated,
+                )
+            ]
+        return []
     if line_type not in MESSAGE_TYPES:
         return []
 
@@ -192,11 +216,18 @@ def parse_line(obj: Mapping[str, object], *, sidechain: bool) -> list[Block]:
         and not bool(obj.get("isCompactSummary"))
     )
 
+    usage_out: int | None = None
+    if role == "assistant":
+        usage = message.get("usage")
+        if isinstance(usage, Mapping) and isinstance(usage.get("output_tokens"), int):
+            usage_out = int(str(usage["output_tokens"]))
+
     content = message.get("content")
+    blocks: list[Block] = []
     if isinstance(content, str):
         payload, truncated = _dump({"type": "text", "text": content})
         text, text_truncated = _truncate(content)
-        return [
+        blocks = [
             Block(
                 role=role,
                 block_type="text",
@@ -206,10 +237,14 @@ def parse_line(obj: Mapping[str, object], *, sidechain: bool) -> list[Block]:
                 is_human=1 if human_ok and is_human_text(content) else 0,
             )
         ]
-    if isinstance(content, list):
-        return [
+    elif isinstance(content, list):
+        blocks = [
             _block_from_content_block(raw, role, human_ok)
             for raw in content
             if isinstance(raw, Mapping)
         ]
-    return []
+    if blocks and usage_out is not None:
+        # Sur le premier bloc seulement ; la dédup entre lignes d'un même
+        # message API (même message.id) se fait à l'ingestion.
+        blocks[0].usage_out = usage_out
+    return blocks

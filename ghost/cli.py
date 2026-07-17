@@ -28,9 +28,44 @@ DbOpt = Annotated[Path, typer.Option(help="Chemin de la base SQLite.")]
 
 
 @app.command()
-def ingest(root: RootOpt = DEFAULT_ROOT, db: DbOpt = DEFAULT_DB) -> None:
+def ingest(
+    root: RootOpt = DEFAULT_ROOT,
+    db: DbOpt = DEFAULT_DB,
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild",
+            help="Vide les tables brutes (events/sessions/agents/files_touched/"
+            "ingest_log) et ré-ingère tout. Les tables dérivées (candidates, "
+            "skills, deployments) sont intactes.",
+        ),
+    ] = False,
+) -> None:
     """Ingère ~/.claude/projects/**/*.jsonl (idempotent, streaming)."""
     conn = connect(db)
+    if rebuild:
+        # Claude Code purge les vieux JSONL (cleanupPeriodDays) : un rebuild
+        # ne ré-ingère que ce qui existe encore. On refuse de perdre des
+        # sessions en silence.
+        missing = [
+            str(path)
+            for (path,) in conn.execute("SELECT path FROM ingest_log")
+            if not Path(str(path)).exists()
+        ]
+        if missing:
+            conn.close()
+            console.print(
+                f"[red]{len(missing)} fichier(s) ingéré(s) ont disparu du disque[/red] "
+                "(purge Claude Code ?) — un rebuild PERDRAIT ces sessions "
+                "définitivement. Abandon. Exemples :"
+            )
+            for path in missing[:5]:
+                console.print(f"  - {path}")
+            raise typer.Exit(1)
+        for table in ("files_touched", "events", "agents", "sessions", "ingest_log"):
+            conn.execute(f"DELETE FROM {table}")
+        conn.commit()
+        console.print("[yellow]tables brutes vidées — ré-ingestion complète[/yellow]")
     files = scan_files(root)
     summary = Summary(n_files=len(files))
     with Progress(
@@ -427,6 +462,26 @@ def run(
     console.print(
         "\nTriage : `ghost skills` puis `ghost keep <candidat>` et `ghost deploy`."
     )
+
+
+@app.command()
+def watch(
+    db: DbOpt = DEFAULT_DB,
+    why: Annotated[
+        bool, typer.Option("--why", help="Liste les confondants qui invalident la lecture.")
+    ] = False,
+) -> None:
+    """Signal précoce : sessions exposées aux skills vs baseline (0 inférence)."""
+    from ghost.watch import collect, render, render_why
+
+    conn = connect(db)
+    try:
+        report = collect(conn)
+    finally:
+        conn.close()
+    console.print(render(report), highlight=False)
+    if why:
+        console.print("\n" + render_why(report), highlight=False)
 
 
 def main() -> None:

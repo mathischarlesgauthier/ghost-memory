@@ -29,8 +29,8 @@ _BATCH_SIZE = 500
 _INSERT_EVENT = """
 INSERT INTO events (session_id, agent_id, seq, ts, role, block_type, tool_name,
                     tool_use_id, is_error, is_human, text, payload_json,
-                    payload_truncated, src_file, src_line)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_truncated, usage_out, msg_id, src_file, src_line)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _EventRow = tuple[
@@ -47,6 +47,8 @@ _EventRow = tuple[
     str | None,
     str | None,
     int,
+    int | None,
+    str | None,
     str,
     int,
 ]
@@ -244,6 +246,11 @@ def ingest_file(conn: sqlite3.Connection, source: SourceFile) -> FileResult:
             cwd = meta.cwd or cwd
             git_branch = meta.git_branch or git_branch
             version = meta.version or version
+            # Un même message API s'étale sur plusieurs lignes JSONL portant
+            # des snapshots d'usage CUMULATIFS (le dernier = total). On stocke
+            # chaque snapshot avec son msg_id ; l'agrégation fait
+            # SUM(MAX(usage_out) GROUP BY msg_id) — mesuré : garder le premier
+            # snapshot sous-comptait les tokens subagents à 14 % du réel.
             for block in blocks:
                 seq += 1
                 for path, op in block.paths:
@@ -263,6 +270,8 @@ def ingest_file(conn: sqlite3.Connection, source: SourceFile) -> FileResult:
                         block.text,
                         block.payload_json,
                         block.payload_truncated,
+                        block.usage_out,
+                        meta.msg_id,
                         src_file,
                         lineno,
                     )
