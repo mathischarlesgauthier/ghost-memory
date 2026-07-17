@@ -221,5 +221,77 @@ def _resolve_evidence(
     )
 
 
+@app.command()
+def distill(
+    candidate_id: int,
+    db: DbOpt = DEFAULT_DB,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Affiche le prompt et la trace, n'appelle pas.")
+    ] = False,
+) -> None:
+    """Distille un candidat en SKILL.md (~/.ghost/skills/<slug>/)."""
+    import anthropic as _anthropic
+
+    from ghost.distill import (
+        SYSTEM_PROMPT,
+        DistillError,
+        default_caller,
+    )
+    from ghost.distill import (
+        distill as run_distill,
+    )
+    from ghost.redact import RedactionError
+    from ghost.trace import build_trace
+
+    conn = connect(db)
+    try:
+        if dry_run:
+            trace = build_trace(conn, candidate_id)
+            traces_dir = db.parent / "traces"
+            traces_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = traces_dir / f"candidate-{candidate_id}.txt"
+            trace_path.write_text(trace.text, encoding="utf-8")
+            console.print(f"[bold]— PROMPT SYSTÈME —[/bold]\n{SYSTEM_PROMPT}\n")
+            console.print(
+                f"[bold]— TRACE —[/bold] ~{trace.est_tokens} tokens · "
+                f"{trace.n_occurrences} occurrences ({trace.n_occurrences_dropped} coupées) · "
+                f"redactions {trace.redactions or 'aucune'} · écrite dans {trace_path}\n"
+            )
+            console.print(trace.text[:4000])
+            return
+        result = run_distill(
+            conn, candidate_id, caller=default_caller(_anthropic.Anthropic())
+        )
+    except (DistillError, RedactionError, ValueError) as exc:
+        console.print(f"[red]échec distillation :[/red] {exc}")
+        raise typer.Exit(1) from exc
+    except _anthropic.APIError as exc:
+        console.print(f"[red]erreur API :[/red] {type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+    console.print(
+        f"[bold]{result.verdict}[/bold] · {result.tokens_in} tokens in · "
+        f"{result.tokens_out} out · {result.cost_usd:.3f}$ · "
+        f"redactions {result.trace.redactions or 'aucune'}"
+    )
+    if result.verdict == "SKIP":
+        console.print(f"raison : {result.skip_reason}")
+        return
+    if result.low_value:
+        console.print("[yellow]⚠ marqué low_value par l'auto-critique[/yellow]")
+    else:
+        console.print(f"auto-critique : OUI — « {result.critique_line[:120]} »")
+    console.print(f"écrit : {result.skill_path}\n")
+    assert result.skill_md is not None
+    in_pieges = False
+    for line in result.skill_md.splitlines():
+        if line.startswith("## "):
+            in_pieges = line == "## Pièges"
+        style = "bold yellow" if in_pieges else ""
+        console.print(line, style=style, highlight=False)
+
+
 def main() -> None:
     app()

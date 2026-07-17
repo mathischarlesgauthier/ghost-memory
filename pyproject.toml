@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "typer>=0.15",
     "rich>=13.9",
+    "anthropic>=0.117.0",
 ]
 
 [project.scripts]

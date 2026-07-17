@@ -85,6 +85,23 @@ CREATE TABLE IF NOT EXISTS candidates (
     UNIQUE(kind, signature)
 );
 
+CREATE TABLE IF NOT EXISTS skills (
+    id             INTEGER PRIMARY KEY,
+    candidate_id   INTEGER NOT NULL,
+    slug           TEXT,
+    path           TEXT,
+    model          TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    verdict        TEXT NOT NULL,
+    low_value      INTEGER NOT NULL DEFAULT 0,
+    skip_reason    TEXT,
+    critique_line  TEXT,
+    tokens_in      INTEGER NOT NULL DEFAULT 0,
+    tokens_out     INTEGER NOT NULL DEFAULT 0,
+    cost_usd       REAL NOT NULL DEFAULT 0,
+    created_at     TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_tool_name   ON events(tool_name);
 CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id);
