@@ -27,6 +27,167 @@ RootOpt = Annotated[Path, typer.Option(help="Racine des projets Claude Code.")]
 DbOpt = Annotated[Path, typer.Option(help="Chemin de la base SQLite.")]
 
 
+def _resolve_skill_id(conn: sqlite3.Connection, token: str) -> int:
+    """Résout un token (id skill / id candidat / slug) en id de SKILL, ou sort
+    proprement avec un message actionnable."""
+    from ghost.resolve import ResolveError, resolve_skill
+
+    try:
+        r = resolve_skill(conn, token)
+    except ResolveError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if r.note:
+        console.print(f"[dim]{r.note}[/dim]")
+    return r.id
+
+
+def _resolve_candidate_id(conn: sqlite3.Connection, token: str) -> int:
+    """Résout un token en id de CANDIDAT, ou sort proprement."""
+    from ghost.resolve import ResolveError, resolve_candidate
+
+    try:
+        r = resolve_candidate(conn, token)
+    except ResolveError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if r.note:
+        console.print(f"[dim]{r.note}[/dim]")
+    return r.id
+
+
+@app.command()
+def init(
+    root: RootOpt = DEFAULT_ROOT,
+    db: DbOpt = DEFAULT_DB,
+    api_key: Annotated[
+        str | None, typer.Option(help="Clé Anthropic (sinon demandée/opt-in).")
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Non-interactif : ne demande rien.")
+    ] = False,
+    no_scan: Annotated[
+        bool, typer.Option("--no-scan", help="Ne lance pas le premier scan.")
+    ] = False,
+) -> None:
+    """Onboarding : PATH, clé API, détection Claude Code, premier scan guidé.
+
+    Conçu pour ne JAMAIS planter sur une machine vierge : chaque étape absente
+    donne une consigne, pas une trace.
+    """
+    import os as _os
+
+    from ghost.onboard import (
+        API_KEY_FILE,
+        detect_shell_rc,
+        ghost_on_path,
+        history_status,
+        ping_api_key,
+        write_api_key,
+    )
+
+    console.print("[bold]Ghost Memory — installation guidée[/bold]\n")
+
+    # 1. PATH
+    if ghost_on_path():
+        console.print("[green]✓[/green] `ghost` est sur le PATH.")
+    else:
+        console.print(
+            "[yellow]•[/yellow] `ghost` n'est pas sur le PATH.\n"
+            "    → lance [bold]uv tool update-shell[/bold] puis rouvre ton terminal "
+            f"(ou ajoute ~/.local/bin au PATH dans {detect_shell_rc()})."
+        )
+
+    # 2. Clé API (opt-in, jamais commitée, chmod 600)
+    key: str | None = api_key
+    if key is None and API_KEY_FILE.exists():
+        console.print("[green]✓[/green] clé API déjà enregistrée (~/.ghost/api_key).")
+        key = API_KEY_FILE.read_text(encoding="utf-8").strip()
+    if key is None:
+        env_key = _os.environ.get("ANTHROPIC_API_KEY")
+        if env_key:
+            key = env_key
+        elif not yes:
+            key = typer.prompt(
+                "Colle ta clé Anthropic (sk-ant-…)", hide_input=True
+            ).strip()
+    if key:
+        ok, msg = ping_api_key(key)
+        if ok:
+            write_api_key(key)
+            console.print(f"[green]✓[/green] {msg} — enregistrée (chmod 600).")
+        else:
+            console.print(
+                f"[red]✗[/red] {msg}\n    Récupère une clé et relance `ghost init`."
+            )
+    else:
+        console.print(
+            "[yellow]•[/yellow] pas de clé API — `ingest`/`scan` marchent sans, mais "
+            "`distill`/`validate`/`bench` en auront besoin. Relance `ghost init` "
+            "quand tu l'auras."
+        )
+
+    # 3. Claude Code / historique
+    hist = history_status(root)
+    if hist.projects_exist and hist.n_files:
+        console.print(
+            f"[green]✓[/green] historique Claude Code : {hist.n_files} session(s)."
+        )
+    elif hist.projects_exist:
+        console.print(
+            f"[yellow]•[/yellow] {root} existe mais est vide — code un peu avec "
+            "Claude Code, puis relance `ghost init`."
+        )
+    else:
+        console.print(
+            f"[yellow]•[/yellow] aucun historique Claude Code ({root} absent).\n"
+            "    → installe Claude Code (code.claude.com) et code un peu : Ghost "
+            "apprend de ton historique."
+        )
+
+    # 4. Premier scan guidé — l'activation, c'est voir ses candidats.
+    if no_scan or not (hist.projects_exist and hist.n_files):
+        console.print(
+            "\nProchaine étape quand tu auras de l'historique : "
+            "[bold]ghost run[/bold] (ingest + scan + distille)."
+        )
+        return
+    console.print("\n[bold]Premier scan…[/bold]")
+    from ghost.ingest import ingest_all, scan_files
+    from ghost.scan import run_scan
+
+    conn = connect(db)
+    try:
+        files = scan_files(root)
+        for _source, _result in ingest_all(conn, root):
+            pass
+        if conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0:
+            console.print(
+                "historique présent mais illisible — `ghost doctor` pour diagnostiquer."
+            )
+            return
+        merged = run_scan(conn)
+        console.print(
+            f"[green]✓[/green] {len(files)} fichier(s) ingéré(s), "
+            f"[bold]{len(merged)}[/bold] candidat(s) détecté(s).\n"
+        )
+        table = Table(title="Tes candidats (top 10)")
+        for col in ("id", "kind", "signature", "score"):
+            table.add_column(col)
+        for cid, kind, sig, score in conn.execute(
+            "SELECT id, kind, signature, score FROM candidates "
+            "WHERE status = 'new' ORDER BY score DESC LIMIT 10"
+        ):
+            table.add_row(str(cid), str(kind), str(sig)[:60], f"{score:.1f}")
+        console.print(table)
+        console.print(
+            "\nRegarde-en un : [bold]ghost show <id>[/bold] · distille : "
+            "[bold]ghost distill <id>[/bold] · ou tout d'un coup : [bold]ghost run[/bold]."
+        )
+    finally:
+        conn.close()
+
+
 @app.command()
 def ingest(
     root: RootOpt = DEFAULT_ROOT,
@@ -189,7 +350,7 @@ def scan(db: DbOpt = DEFAULT_DB) -> None:
 
 @app.command()
 def show(
-    candidate_id: int,
+    candidate: Annotated[str, typer.Argument(help="id candidat, id skill, ou slug.")],
     db: DbOpt = DEFAULT_DB,
     max_occurrences: Annotated[int, typer.Option(help="Occurrences affichées.")] = 5,
 ) -> None:
@@ -197,6 +358,7 @@ def show(
     import json as _json
 
     conn = connect(db)
+    candidate_id = _resolve_candidate_id(conn, candidate)
     row = conn.execute(
         "SELECT kind, signature, score, n_occ, n_sessions, status, evidence_json "
         "FROM candidates WHERE id = ?",
@@ -266,10 +428,17 @@ def _resolve_evidence(
 
 @app.command()
 def distill(
-    candidate_id: int,
+    candidate: Annotated[str, typer.Argument(help="id candidat, id skill, ou slug.")],
     db: DbOpt = DEFAULT_DB,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Affiche le prompt et la trace, n'appelle pas.")
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Redistille même si un skill existe déjà (l'ancien est désactivé).",
+        ),
     ] = False,
 ) -> None:
     """Distille un candidat en SKILL.md (~/.ghost/skills/<slug>/)."""
@@ -284,10 +453,13 @@ def distill(
         distill as run_distill,
     )
     from ghost.redact import RedactionError
+    from ghost.resolve import skills_for_candidate
     from ghost.trace import build_trace
 
     conn = connect(db)
+    superseded = 0
     try:
+        candidate_id = _resolve_candidate_id(conn, candidate)
         if dry_run:
             trace = build_trace(conn, candidate_id)
             traces_dir = db.parent / "traces"
@@ -302,9 +474,32 @@ def distill(
             )
             console.print(trace.text[:4000])
             return
+        existing = skills_for_candidate(conn, candidate_id)
+        if existing and not force:
+            listing = ", ".join(f"{sid}:{slug}" for sid, slug in existing)
+            console.print(
+                f"[yellow]candidat {candidate_id} a déjà un skill actif : "
+                f"{listing}.[/yellow]\n"
+                "Re-distiller créerait un doublon. Relance avec [bold]--force[/bold] "
+                "pour redistiller (l'ancien sera désactivé), ou édite le SKILL.md "
+                "existant directement."
+            )
+            raise typer.Exit(1)
         result = run_distill(
             conn, candidate_id, caller=default_caller(_anthropic.Anthropic())
         )
+        if result.verdict == "SKILL":
+            # Dédup : ne garder actif que le skill le plus récent du candidat.
+            keep_id = conn.execute(
+                "SELECT MAX(id) FROM skills WHERE candidate_id = ? AND verdict = 'SKILL'",
+                (candidate_id,),
+            ).fetchone()[0]
+            superseded = conn.execute(
+                "UPDATE skills SET disabled = 1 WHERE candidate_id = ? "
+                "AND verdict = 'SKILL' AND id <> ? AND disabled = 0",
+                (candidate_id, keep_id),
+            ).rowcount
+            conn.commit()
     except (DistillError, RedactionError, ValueError) as exc:
         console.print(f"[red]échec distillation :[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -322,6 +517,11 @@ def distill(
     if result.verdict == "SKIP":
         console.print(f"raison : {result.skip_reason}")
         return
+    if superseded:
+        console.print(
+            f"[dim]dédup : {superseded} ancien(s) skill(s) du même candidat "
+            "désactivé(s) — plus de doublon.[/dim]"
+        )
     if result.low_value:
         console.print("[yellow]⚠ marqué low_value par l'auto-critique[/yellow]")
     else:
@@ -336,9 +536,10 @@ def distill(
         console.print(line, style=style, highlight=False)
 
 
-def _set_status(db: Path, candidate_id: int, status: str) -> None:
+def _set_status(db: Path, candidate: str, status: str) -> None:
     conn = connect(db)
     try:
+        candidate_id = _resolve_candidate_id(conn, candidate)
         cur = conn.execute(
             "UPDATE candidates SET status = ? WHERE id = ?", (status, candidate_id)
         )
@@ -352,40 +553,73 @@ def _set_status(db: Path, candidate_id: int, status: str) -> None:
 
 
 @app.command()
-def keep(candidate_id: int, db: DbOpt = DEFAULT_DB) -> None:
+def keep(
+    candidate: Annotated[str, typer.Argument(help="id candidat, id skill, ou slug.")],
+    db: DbOpt = DEFAULT_DB,
+) -> None:
     """Valide un candidat (déployable via ghost deploy)."""
-    _set_status(db, candidate_id, "kept")
+    _set_status(db, candidate, "kept")
 
 
 @app.command()
-def reject(candidate_id: int, db: DbOpt = DEFAULT_DB) -> None:
+def reject(
+    candidate: Annotated[str, typer.Argument(help="id candidat, id skill, ou slug.")],
+    db: DbOpt = DEFAULT_DB,
+) -> None:
     """Rejette un candidat (survit aux re-scans, jamais re-proposé)."""
-    _set_status(db, candidate_id, "rejected")
+    _set_status(db, candidate, "rejected")
 
 
 @app.command()
 def skills(db: DbOpt = DEFAULT_DB) -> None:
-    """Liste les skills distillés : verdict, coût, statut, déploiement."""
+    """Liste les skills distillés : verdict, coût, statut, déploiement, doublons."""
     conn = connect(db)
     rows = conn.execute(
         """
         SELECT sk.id, sk.candidate_id, COALESCE(sk.slug, '—'), sk.verdict,
-               sk.low_value, sk.cost_usd, c.status,
+               sk.low_value, sk.disabled, sk.cost_usd, c.status,
                (SELECT COUNT(*) FROM deployments d WHERE d.skill_id = sk.id)
         FROM skills sk LEFT JOIN candidates c ON c.id = sk.candidate_id
-        ORDER BY sk.id
+        ORDER BY sk.candidate_id, sk.id
         """
     ).fetchall()
+    if not rows:
+        console.print(
+            "aucun skill distillé pour l'instant — lance `ghost run` (ou "
+            "`ghost distill <candidat>`) après un `ghost scan`."
+        )
+        conn.close()
+        return
+    # Doublon = candidat ayant >1 skill SKILL ACTIF (non désactivé).
+    active_by_cand: dict[int, int] = {}
+    for _sid, cid, _slug, verdict, _lv, disabled, _c, _st, _nd in rows:
+        if verdict == "SKILL" and not disabled:
+            active_by_cand[int(cid)] = active_by_cand.get(int(cid), 0) + 1
+    dup_cands = {cid for cid, n in active_by_cand.items() if n > 1}
     table = Table(title="Skills distillés")
     for col in ("id", "candidat", "slug", "verdict", "coût", "statut", "déployé"):
         table.add_column(col)
-    for sid, cid, slug, verdict, low_value, cost, status, n_dep in rows:
-        verdict_s = f"{verdict}{' ⚠low_value' if low_value else ''}"
+    for sid, cid, slug, verdict, low_value, disabled, cost, status, n_dep in rows:
+        flags = ""
+        if low_value:
+            flags += " ⚠low_value"
+        if disabled:
+            flags += " (désactivé)"
+        if int(cid) in dup_cands and verdict == "SKILL" and not disabled:
+            flags += " ⚠DOUBLON"
         table.add_row(
-            str(sid), str(cid), str(slug), verdict_s, f"{cost:.3f}$",
+            str(sid), str(cid), str(slug), f"{verdict}{flags}", f"{cost:.3f}$",
             str(status or "?"), "oui" if n_dep else "non",
+            style="dim" if disabled else "",
         )
     console.print(table)
+    if dup_cands:
+        listing = ", ".join(str(c) for c in sorted(dup_cands))
+        console.print(
+            f"\n[yellow]⚠ {len(dup_cands)} candidat(s) avec doublon : {listing}. "
+            "`ghost distill <candidat> --force` régénère et désactive l'ancien ; "
+            "ou `ghost disable <id>` retire manuellement un doublon.[/yellow]"
+        )
     conn.close()
 
 
@@ -494,7 +728,9 @@ def watch(
 
 @app.command()
 def validate(
-    skill_id: int,
+    skill_ref: Annotated[
+        str, typer.Argument(metavar="SKILL", help="id skill, id candidat, ou slug.")
+    ],
     db: DbOpt = DEFAULT_DB,
     max_cost: Annotated[float, typer.Option(help="Plafond de dépense ($) du replay.")] = 8.0,
     runs: Annotated[int, typer.Option(help="Runs par condition et par cas (≥3).")] = 3,
@@ -526,6 +762,7 @@ def validate(
 
     conn = connect(db)
     try:
+        skill_id = _resolve_skill_id(conn, skill_ref)
         skill = skill_info(conn, skill_id)
         cases, counts = eligible_cases(conn, skill, match=match)
         if max_cases > 0 and len(cases) > max_cases:
@@ -639,7 +876,9 @@ def validate(
 
 @app.command()
 def bench(
-    skill_id: int,
+    skill_ref: Annotated[
+        str, typer.Argument(metavar="SKILL", help="id skill, id candidat, ou slug.")
+    ],
     db: DbOpt = DEFAULT_DB,
     max_cost: Annotated[float, typer.Option(help="Plafond de dépense ($).")] = 6.0,
     runs: Annotated[int, typer.Option(help="Runs par condition et par banc (≥3).")] = 3,
@@ -660,6 +899,7 @@ def bench(
 
     conn = connect(db)
     try:
+        skill_id = _resolve_skill_id(conn, skill_ref)
         skill = skill_info(conn, skill_id)
         benches = benches_for(skill.slug)
         if not benches:
@@ -754,12 +994,18 @@ def why(db: DbOpt = DEFAULT_DB) -> None:
 
 
 @app.command()
-def disable(skill_id: int, db: DbOpt = DEFAULT_DB) -> None:
+def disable(
+    skill_ref: Annotated[
+        str, typer.Argument(metavar="SKILL", help="id skill, id candidat, ou slug.")
+    ],
+    db: DbOpt = DEFAULT_DB,
+) -> None:
     """Retire un skill déployé — plus jamais injecté (réactivable via enable)."""
     from ghost.manage import disable_skill
 
     conn = connect(db)
     try:
+        skill_id = _resolve_skill_id(conn, skill_ref)
         removed, refused = disable_skill(conn, skill_id)
     finally:
         conn.close()
@@ -772,12 +1018,18 @@ def disable(skill_id: int, db: DbOpt = DEFAULT_DB) -> None:
 
 
 @app.command()
-def enable(skill_id: int, db: DbOpt = DEFAULT_DB) -> None:
+def enable(
+    skill_ref: Annotated[
+        str, typer.Argument(metavar="SKILL", help="id skill, id candidat, ou slug.")
+    ],
+    db: DbOpt = DEFAULT_DB,
+) -> None:
     """Réactive un skill désactivé (redéployable via ghost deploy)."""
     from ghost.manage import enable_skill
 
     conn = connect(db)
     try:
+        skill_id = _resolve_skill_id(conn, skill_ref)
         enable_skill(conn, skill_id)
     finally:
         conn.close()
