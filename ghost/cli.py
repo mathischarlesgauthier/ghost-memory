@@ -1157,14 +1157,25 @@ ApiUrlOpt = Annotated[
 
 
 @app.command()
-def login(api_url: ApiUrlOpt = None) -> None:
+def login(
+    api_url: ApiUrlOpt = None,
+    token: Annotated[
+        str | None,
+        typer.Option("--token", help="Adopte un jeton existant (créé sur le web)."),
+    ] = None,
+) -> None:
     """Se connecte au réseau Ghost (device flow). Stocke un jeton Ghost — jamais
-    ta clé Anthropic."""
+    ta clé Anthropic. `--token` adopte un jeton déjà créé sur le site."""
     import time
     import webbrowser
     from contextlib import suppress
 
     from ghost.network import NetworkError, api_base, device_login, save_token
+
+    if token:
+        path = save_token(token)
+        console.print(f"[green]✓ jeton enregistré[/green] ({path}, chmod 600).")
+        return
 
     base = api_url or api_base()
 
