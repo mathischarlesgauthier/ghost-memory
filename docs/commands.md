@@ -106,6 +106,17 @@ affiché. **Hors ligne** : elles montrent le dernier état connu avec un avertis
 « peut être périmé », jamais un plantage. Le réseau étant jeune, les gains sont
 honnêtement à 0 tant qu'aucun lift n'est mesuré.
 
+### `ghost login`
+Connecte le CLI au réseau (**device flow**). Affiche un code court (ex.
+`K7Q2-9FMX`) et ouvre `https://ghost-memory.com/device` : tu entres le code, la
+page l'autorise, et le terminal récupère seul un **jeton Ghost** — jamais ta clé
+Anthropic — stocké dans `~/.ghost/ghost_token` (`chmod 600`). Le code expire au
+bout de 10 min ; s'il périme, relance `ghost login`. `--token <jeton>` adopte un
+jeton déjà créé sur le web.
+
+### `ghost logout`
+Supprime le jeton Ghost local.
+
 ### `ghost usage`
 Consommation du cycle : palier, déblocages utilisés / quota, reset, barre de
 progression. Alerte + suggestion d'upgrade au-delà de 80 %. Un déblocage = 1ᵉʳ ajout
