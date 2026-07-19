@@ -1151,5 +1151,72 @@ def telemetry_send(db: DbOpt = DEFAULT_DB) -> None:
         raise typer.Exit(1)
 
 
+ApiUrlOpt = Annotated[
+    str | None, typer.Option("--api-url", help="Base API Ghost (sinon GHOST_API_URL).")
+]
+
+
+@app.command()
+def login(api_url: ApiUrlOpt = None) -> None:
+    """Se connecte au réseau Ghost (device flow). Stocke un jeton Ghost — jamais
+    ta clé Anthropic."""
+    import time
+    import webbrowser
+    from contextlib import suppress
+
+    from ghost.network import NetworkError, api_base, device_login, save_token
+
+    base = api_url or api_base()
+
+    def prompt(uri: str, code: str) -> None:
+        console.print(
+            f"Ouvre [bold]{uri}[/bold] et entre le code : [bold]{code}[/bold]"
+        )
+        with suppress(Exception):
+            webbrowser.open(uri)
+
+    try:
+        token = device_login(base=base, on_prompt=prompt, poll=time.sleep)
+    except NetworkError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    path = save_token(token)
+    console.print(f"[green]✓ connecté[/green] — jeton enregistré ({path}, chmod 600).")
+
+
+@app.command()
+def logout() -> None:
+    """Supprime le jeton Ghost local."""
+    from ghost.network import clear_token
+
+    clear_token()
+    console.print("déconnecté — jeton supprimé.")
+
+
+@app.command()
+def upgrade(
+    tier: Annotated[str, typer.Argument(help="pro | team | scale")],
+    api_url: ApiUrlOpt = None,
+) -> None:
+    """Ouvre le Checkout Stripe pour passer à un palier payant (nécessite login)."""
+    import webbrowser
+    from contextlib import suppress
+
+    from ghost.network import NetworkError, checkout_url, load_token
+
+    token = load_token()
+    if not token:
+        console.print("connecte-toi d'abord : [bold]ghost login[/bold]")
+        raise typer.Exit(1)
+    try:
+        url = checkout_url(tier, token, base=api_url or None)
+    except NetworkError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"Ouvre pour payer (test) : [bold]{url}[/bold]")
+    with suppress(Exception):
+        webbrowser.open(url)
+
+
 def main() -> None:
     app()
