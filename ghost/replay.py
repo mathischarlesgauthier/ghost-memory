@@ -29,7 +29,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +48,7 @@ ALLOWED_TOOLS: tuple[str, ...] = (
     "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)",
     "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
     "Bash(uv run:*)", "Bash(uv sync:*)", "Bash(pytest:*)",
+    "Bash(python:*)", "Bash(python3:*)",
     "Bash(npm run:*)", "Bash(npm test:*)", "Bash(pnpm run:*)",
     "Bash(pnpm test:*)", "Bash(ls:*)", "Bash(mkdir:*)", "Bash(grep:*)",
     "Bash(find:*)", "Bash(cat:*)",
@@ -83,6 +84,28 @@ class RunMetrics:
     denials: int
     timed_out: bool = False
     jsonl_missing: bool = False  # transcript introuvable : tool_errors invalide
+    budget_exhausted: bool = False  # run coupé par --max-budget-usd : JAMAIS ✗
+
+
+# Un run « incomplet » (coupé par le temps ou le budget) n'a pas vraiment
+# travaillé : il ne doit jamais compter comme un échec de la tâche. C'est une
+# catégorie distincte (cf. Lot A : coupé-budget/timeout comptés ✗ faussait tout).
+def is_incomplete(m: RunMetrics) -> bool:
+    return m.timed_out or m.budget_exhausted
+
+
+def resolve_success(
+    work: Path, checker: Callable[[Path], bool] | None, new_commits: int
+) -> bool:
+    """Critère ✓/✗ défendable (Lot B). Avec un `checker` (banc synthétique) :
+    la tâche est résolue ssi le checker passe — commit ≠ résolu. Sans checker
+    (replay historique) : repli sur « au moins un commit produit »."""
+    if checker is not None:
+        try:
+            return bool(checker(work))
+        except Exception:
+            return False
+    return new_commits > 0
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -187,6 +210,7 @@ def run_replay(
     budget_usd: float = PER_RUN_BUDGET_USD,
     model: str = REPLAY_MODEL,
     timeout_s: int = RUN_TIMEOUT_S,
+    checker: Callable[[Path], bool] | None = None,
 ) -> RunMetrics:
     if not hasattr(os, "killpg") or not hasattr(os, "getpgid"):
         raise ReplayError(
@@ -243,18 +267,28 @@ def run_replay(
         )
         denials = result.get("permission_denials")
         tool_errors, found = _count_tool_errors(cfg)
+        cost_usd = _as_float(result.get("total_cost_usd"))
+        success = resolve_success(work, checker, new_commits)
+        # Coupé par le budget : le CLI signale un subtype budget, ou le coût
+        # atteint le plafond sans que la tâche soit résolue (heuristique
+        # documentée). Un tel run est INCOMPLET, jamais un ✗ de la tâche.
+        subtype = str(result.get("subtype") or "").lower()
+        budget_exhausted = "budget" in subtype or (
+            not success and cost_usd >= 0.98 * budget_usd
+        )
         return RunMetrics(
             turns=_as_int(result.get("num_turns")),
-            cost_usd=_as_float(result.get("total_cost_usd")),
+            cost_usd=cost_usd,
             duration_ms=_as_int(result.get("duration_ms")),
             output_tokens=_as_int(output_tokens),
             tool_errors=tool_errors,
             new_commits=new_commits,
             changed_lines=_changed_lines(shortstat),
-            success=new_commits > 0,
+            success=success,
             is_error=bool(result.get("is_error")),
             denials=len(denials) if isinstance(denials, list) else 0,
             jsonl_missing=not found,
+            budget_exhausted=budget_exhausted,
         )
     finally:
         shutil.rmtree(cfg, ignore_errors=True)

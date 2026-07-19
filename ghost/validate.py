@@ -278,6 +278,7 @@ def _metrics_dict(metrics: RunMetrics) -> dict[str, object]:
         "changed_lines": metrics.changed_lines, "success": metrics.success,
         "is_error": metrics.is_error, "denials": metrics.denials,
         "timed_out": metrics.timed_out, "jsonl_missing": metrics.jsonl_missing,
+        "budget_exhausted": metrics.budget_exhausted,
     }
 
 
@@ -369,31 +370,39 @@ class LiftReport:
     n_runs: int
     cost_usd: float
     lifts: list[Lift] = field(default_factory=list)
-    success_sans: tuple[int, int] = (0, 0)
+    success_sans: tuple[int, int] = (0, 0)  # ✓ / runs COMPLETS (hors coupés)
     success_avec: tuple[int, int] = (0, 0)
+    incomplete_sans: int = 0  # runs coupés (budget/timeout) — jamais des ✗
+    incomplete_avec: int = 0
     verdict: str = "pas de lift mesurable"
 
 
-def aggregate(conn: sqlite3.Connection, skill_id: int) -> LiftReport:
-    rows = conn.execute(
-        "SELECT case_id, condition, metrics_json, cost_usd FROM replays "
-        "WHERE skill_id = ?",
-        (skill_id,),
-    ).fetchall()
+def _run_incomplete(m: dict[str, object]) -> bool:
+    return bool(m.get("timed_out")) or bool(m.get("budget_exhausted"))
+
+
+def aggregate_records(
+    records: list[tuple[str, str, dict[str, object]]], *, skill_id: int = 0
+) -> LiftReport:
+    """Agrégation pure (testable sans base). `records` = (case_id, condition,
+    metrics_dict). Les runs incomplets (coupés par budget/timeout) sont exclus
+    du taux de succès ET des métriques d'efficacité — ils n'ont pas travaillé.
+    """
     by_case: dict[str, dict[str, list[dict[str, object]]]] = {}
     total_cost = 0.0
-    for case_id, condition, metrics_json, cost in rows:
-        by_case.setdefault(str(case_id), {}).setdefault(str(condition), []).append(
-            json.loads(str(metrics_json))
-        )
-        total_cost += float(cost)
+    n_runs = 0
+    for case_id, condition, m in records:
+        n_runs += 1
+        by_case.setdefault(case_id, {}).setdefault(condition, []).append(m)
+        cost = m.get("cost_usd", 0)
+        total_cost += float(cost) if isinstance(cost, (int, float)) else 0.0
     complete_cases = {
         case_id: conds
         for case_id, conds in by_case.items()
         if conds.get("sans") and conds.get("avec")
     }
     report = LiftReport(
-        skill_id=skill_id, n_cases=len(complete_cases), n_runs=len(rows),
+        skill_id=skill_id, n_cases=len(complete_cases), n_runs=n_runs,
         cost_usd=round(total_cost, 2),
     )
     if not complete_cases:
@@ -403,11 +412,24 @@ def aggregate(conn: sqlite3.Connection, skill_id: int) -> LiftReport:
         value = m.get(key, 0)
         return float(value) if isinstance(value, (int, float)) else 0.0
 
+    # Métriques d'efficacité mesurées sur les runs COMPLETS uniquement.
+    done: dict[str, dict[str, list[dict[str, object]]]] = {}
+    for case_id, conds in complete_cases.items():
+        done[case_id] = {
+            cond: [m for m in runs_list if not _run_incomplete(m)]
+            for cond, runs_list in conds.items()
+        }
+    measurable = {
+        case_id: conds
+        for case_id, conds in done.items()
+        if conds.get("sans") and conds.get("avec")
+    }
+
     # tool_errors n'est agrégeable que si TOUS les transcripts ont été
     # retrouvés — « pas de JSONL » n'est pas « pas d'erreur ».
-    errors_valid = not any(
+    errors_valid = measurable and not any(
         m.get("jsonl_missing")
-        for conds in complete_cases.values()
+        for conds in measurable.values()
         for runs_list in conds.values()
         for m in runs_list
     )
@@ -418,12 +440,14 @@ def aggregate(conn: sqlite3.Connection, skill_id: int) -> LiftReport:
         deltas: list[float] = []
         sans_meds: list[float] = []
         avec_meds: list[float] = []
-        for conds in complete_cases.values():
+        for conds in measurable.values():
             med_sans = median(_num(m, metric) for m in conds["sans"])
             med_avec = median(_num(m, metric) for m in conds["avec"])
             sans_meds.append(med_sans)
             avec_meds.append(med_avec)
             deltas.append(med_avec - med_sans)
+        if not sans_meds:
+            continue
         pooled_sans = median(sans_meds)
         pooled_avec = median(avec_meds)
         delta_pct = (
@@ -437,16 +461,33 @@ def aggregate(conn: sqlite3.Connection, skill_id: int) -> LiftReport:
                 consistent=consistent,
             )
         )
-    sans_ok = sum(
-        1 for c in complete_cases.values() for m in c["sans"] if m.get("success")
+    # Succès = ✓ parmi les runs COMPLETS. Les coupés sont comptés à part.
+    def _ok(conds: dict[str, list[dict[str, object]]], cond: str) -> int:
+        return sum(
+            1 for m in conds.get(cond, [])
+            if m.get("success") and not _run_incomplete(m)
+        )
+
+    def _complete_n(conds: dict[str, list[dict[str, object]]], cond: str) -> int:
+        return sum(1 for m in conds.get(cond, []) if not _run_incomplete(m))
+
+    def _incomplete_n(conds: dict[str, list[dict[str, object]]], cond: str) -> int:
+        return sum(1 for m in conds.get(cond, []) if _run_incomplete(m))
+
+    report.success_sans = (
+        sum(_ok(c, "sans") for c in complete_cases.values()),
+        sum(_complete_n(c, "sans") for c in complete_cases.values()),
     )
-    sans_n = sum(len(c["sans"]) for c in complete_cases.values())
-    avec_ok = sum(
-        1 for c in complete_cases.values() for m in c["avec"] if m.get("success")
+    report.success_avec = (
+        sum(_ok(c, "avec") for c in complete_cases.values()),
+        sum(_complete_n(c, "avec") for c in complete_cases.values()),
     )
-    avec_n = sum(len(c["avec"]) for c in complete_cases.values())
-    report.success_sans = (sans_ok, sans_n)
-    report.success_avec = (avec_ok, avec_n)
+    report.incomplete_sans = sum(
+        _incomplete_n(c, "sans") for c in complete_cases.values()
+    )
+    report.incomplete_avec = sum(
+        _incomplete_n(c, "avec") for c in complete_cases.values()
+    )
 
     # Verdict : lift seulement si cohérent entre cas ET |Δ| > 20 % pooled.
     # duration_ms est exclu du verdict (bruit de latence mur-à-mur >20 %
@@ -467,6 +508,21 @@ def aggregate(conn: sqlite3.Connection, skill_id: int) -> LiftReport:
             for lift in strong
         )
     return report
+
+
+def aggregate(conn: sqlite3.Connection, skill_id: int) -> LiftReport:
+    rows = conn.execute(
+        "SELECT case_id, condition, metrics_json, cost_usd FROM replays "
+        "WHERE skill_id = ?",
+        (skill_id,),
+    ).fetchall()
+    records: list[tuple[str, str, dict[str, object]]] = []
+    for case_id, condition, metrics_json, cost in rows:
+        m = json.loads(str(metrics_json))
+        if isinstance(m, dict) and "cost_usd" not in m:
+            m["cost_usd"] = float(cost)  # coût persisté hors metrics (anciennes lignes)
+        records.append((str(case_id), str(condition), m if isinstance(m, dict) else {}))
+    return aggregate_records(records, skill_id=skill_id)
 
 
 def write_lift_frontmatter(skill_md: Path, report: LiftReport) -> None:

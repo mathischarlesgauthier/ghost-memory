@@ -638,6 +638,80 @@ def validate(
 
 
 @app.command()
+def bench(
+    skill_id: int,
+    db: DbOpt = DEFAULT_DB,
+    max_cost: Annotated[float, typer.Option(help="Plafond de dépense ($).")] = 6.0,
+    runs: Annotated[int, typer.Option(help="Runs par condition et par banc (≥3).")] = 3,
+    run_budget: Annotated[
+        float, typer.Option(help="Plafond --max-budget-usd par run.")
+    ] = 0.40,
+    yes: Annotated[bool, typer.Option("--yes", help="Saute la confirmation.")] = False,
+) -> None:
+    """Mesure le lift sur des micro-benchmarks SYNTHÉTIQUES (pas du vrai replay).
+
+    Baseline auto-contenue qui réussit vraiment → un lift veut dire quelque chose.
+    Le corpus n'ayant aucun cas court rejouable (cf. Lot A), c'est la voie de
+    mesure retenue. Chaque run réussit ssi le grader déterministe du banc passe.
+    """
+    from ghost.benchmarks import benches_for, run_bench_validation
+    from ghost.replay import ReplayError
+    from ghost.validate import skill_info
+
+    conn = connect(db)
+    try:
+        skill = skill_info(conn, skill_id)
+        benches = benches_for(skill.slug)
+        if not benches:
+            console.print(
+                f"[yellow]aucun micro-benchmark ne cible « {skill.slug} ».[/yellow]\n"
+                "Les bancs sont écrits par scar ciblé (voir ghost/benchmarks.py). "
+                "Ajoute-en un dont target_skills contient ce slug."
+            )
+            raise typer.Exit(1)
+        n_runs = len(benches) * 2 * runs
+        console.print(
+            f"[dim]SYNTHÉTIQUE — pas du vrai replay.[/dim] Bancs pour "
+            f"[bold]{skill.slug}[/bold] : {', '.join(b.slug for b in benches)}\n"
+            f"{len(benches)} banc(s) · {runs} runs/condition · ~{n_runs} runs · "
+            f"plafond dur {max_cost:.2f}$ (budget {run_budget:.2f}$/run)"
+        )
+        if not yes and not typer.confirm("Lancer ?", default=False):
+            raise typer.Exit(0)
+        lift = run_bench_validation(
+            conn, skill, benches, max_cost_usd=max_cost, n_per_condition=runs,
+            per_run_budget=run_budget,
+            on_progress=lambda msg: console.print(f"  [dim]{msg}[/dim]"),
+        )
+        console.print(
+            f"\n╭─ [bold]{lift.verdict.upper()}[/bold]  [dim](synthétique)[/dim]\n"
+            f"│  succès sans {lift.success_sans[0]}/{lift.success_sans[1]} → "
+            f"avec {lift.success_avec[0]}/{lift.success_avec[1]}"
+            + (
+                f"  · incomplets(coupés) sans {lift.incomplete_sans} / "
+                f"avec {lift.incomplete_avec}"
+                if (lift.incomplete_sans or lift.incomplete_avec)
+                else ""
+            )
+            + f"\n│  n={lift.n_cases} bancs · {lift.n_runs} runs · "
+            f"coût {lift.cost_usd:.2f}$\n"
+            f"╰─ relance la même commande pour vérifier la reproductibilité"
+        )
+        for entry in lift.lifts:
+            pct = f"{entry.delta_pct * 100:+.0f}%" if entry.delta_pct is not None else "—"
+            coherent = "cohérent" if entry.consistent else "signes mixtes"
+            console.print(
+                f"   {entry.metric:<13} sans {entry.baseline_median:.0f} → "
+                f"avec {entry.exposed_median:.0f}  ({pct}, {coherent})"
+            )
+    except ReplayError as exc:
+        console.print(f"[red]échec :[/red] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+
+@app.command()
 def doctor(root: RootOpt = DEFAULT_ROOT, db: DbOpt = DEFAULT_DB) -> None:
     """Diagnostic d'installation — chaque ✗ dit quoi faire."""
     from ghost.doctor import run_doctor
