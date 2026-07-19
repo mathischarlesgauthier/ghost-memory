@@ -69,6 +69,49 @@ def clear_token(path: Path = TOKEN_FILE) -> None:
     path.unlink(missing_ok=True)
 
 
+def api_get(
+    path: str, token: str, *, base: str | None = None, http: Http = _urllib_http
+) -> tuple[int, dict[str, object]]:
+    return http("GET", (base or api_base()) + path, None, token)
+
+
+def api_post(
+    path: str,
+    token: str,
+    body: dict[str, object] | None = None,
+    *,
+    base: str | None = None,
+    http: Http = _urllib_http,
+) -> tuple[int, dict[str, object]]:
+    return http("POST", (base or api_base()) + path, body, token)
+
+
+def _cache_file(name: str) -> Path:
+    return TOKEN_FILE.parent / f"cache_{name}.json"
+
+
+def read_cache(name: str) -> dict[str, object] | None:
+    """Dernier état connu (pour l'affichage dégradé hors ligne)."""
+    path = _cache_file(name)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {"_list": data}
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_cache(name: str, data: object) -> None:
+    try:
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _cache_file(name).write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 def device_login(
     *,
     base: str | None = None,

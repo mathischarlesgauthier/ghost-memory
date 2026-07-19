@@ -1229,5 +1229,139 @@ def upgrade(
         webbrowser.open(url)
 
 
+@app.command()
+def usage() -> None:
+    """Consommation du cycle : palier, déblocages utilisés / quota, reset."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.usage))
+
+
+@app.command()
+def unlocked() -> None:
+    """Skills communautaires débloqués ce cycle, classés par lift mesuré."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.unlocked))
+
+
+@app.command()
+def earnings() -> None:
+    """Balance de rémunération (50% du pool, payé au lift x adoption)."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.earnings))
+
+
+@app.command()
+def account() -> None:
+    """Tableau de bord du compte : palier, usage, earnings, profil."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.account))
+
+
+@app.command()
+def history() -> None:
+    """Historique des versements passés."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.history))
+
+
+@app.command()
+def whoami() -> None:
+    """Palier + email/handle courant (debug rapide)."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.whoami))
+
+
+@app.command(name="payout-setup")
+def payout_setup() -> None:
+    """Active les versements — ouvre une page sécurisée (aucune donnée bancaire
+    dans le terminal). Optionnel : nécessaire seulement pour retirer."""
+    from ghost import account as acct
+
+    raise typer.Exit(acct.run(acct.payout_setup))
+
+
+@app.command()
+def publish(
+    skill_ref: Annotated[
+        str, typer.Argument(metavar="SKILL", help="id skill, id candidat, ou slug.")
+    ],
+    db: DbOpt = DEFAULT_DB,
+    public: Annotated[
+        bool, typer.Option("--public", help="Publier en PUBLIC (défaut : privé).")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Saute la confirmation.")] = False,
+) -> None:
+    """Publie un skill vers la mémoire collective. Scan de secrets OBLIGATOIRE,
+    diff avant envoi, privé par défaut."""
+    from ghost.network import NetworkError, api_post, load_token
+    from ghost.redact import redact
+    from ghost.validate import skill_info
+
+    token = load_token()
+    if not token:
+        console.print("connecte-toi d'abord : [bold]ghost login[/bold]")
+        raise typer.Exit(1)
+    conn = connect(db)
+    try:
+        skill_id = _resolve_skill_id(conn, skill_ref)
+        skill = skill_info(conn, skill_id)
+        if not skill.source.exists():
+            console.print(f"[red]SKILL.md introuvable pour {skill.slug}[/red]")
+            raise typer.Exit(1)
+        raw = skill.source.read_text(encoding="utf-8")
+        row = conn.execute(
+            "SELECT signature FROM candidates WHERE id = ?", (skill.candidate_id,)
+        ).fetchone()
+        signature = str(row[0]) if row and row[0] else ""
+    finally:
+        conn.close()
+
+    # Scan de secrets fail-closed AVANT tout envoi.
+    body, counts = redact(raw)
+    visibility = "public" if public else "private"
+    console.print(
+        f"[bold]Publish[/bold] {skill.slug} · visibility: [bold]{visibility}[/bold]"
+    )
+    if counts:
+        console.print(f"[yellow]secret scan — masked:[/yellow] {counts}")
+    else:
+        console.print("[green]secret scan — nothing to mask[/green]")
+    console.print("\n[dim]— exactly what will be sent (redacted) —[/dim]")
+    lines = body.splitlines()
+    for line in lines[:40]:
+        console.print(f"  {line}", highlight=False)
+    if len(lines) > 40:
+        console.print("  [dim]… (preview truncated)[/dim]")
+    if not yes and not typer.confirm(
+        f"\nPublish {skill.slug} as {visibility}?", default=False
+    ):
+        raise typer.Exit(0)
+    try:
+        status, data = api_post(
+            "/registry/publish", token,
+            {
+                "slug": skill.slug, "body": body, "summary": "",
+                "signature": signature, "visibility": visibility,
+            },
+        )
+    except NetworkError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if status != 200:
+        console.print(f"[red]publish échoué ({status})[/red] : {data.get('detail')}")
+        raise typer.Exit(1)
+    console.print(f"\n[green]✓ published[/green] {skill.slug} ({visibility})")
+    if visibility == "public":
+        console.print(
+            "[dim]Its lift will be measured and show up in `ghost earnings`.[/dim]"
+        )
+
+
 def main() -> None:
     app()

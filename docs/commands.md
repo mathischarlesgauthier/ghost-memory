@@ -98,6 +98,78 @@ Retire tous les `SKILL.md` déployés par Ghost Memory. Aucun hook n'a été ins
 État / opt-in / opt-out / **aperçu du payload exact** / envoi. Voir
 [Vie privée](privacy.md).
 
+## Compte & réseau
+
+Ces commandes lisent le **vrai** état via l'API (jamais un chiffre inventé). Le
+jeton Ghost vient du fichier local (`~/.ghost/ghost_token`, `chmod 600`), jamais
+affiché. **Hors ligne** : elles montrent le dernier état connu avec un avertissement
+« peut être périmé », jamais un plantage. Le réseau étant jeune, les gains sont
+honnêtement à 0 tant qu'aucun lift n'est mesuré.
+
+### `ghost usage`
+Consommation du cycle : palier, déblocages utilisés / quota, reset, barre de
+progression. Alerte + suggestion d'upgrade au-delà de 80 %. Un déblocage = 1ᵉʳ ajout
+d'un skill communautaire **distinct** ; réutiliser un skill déjà débloqué ne compte pas.
+
+```
+Pro plan
+  community unlocks: 47 / 200 this cycle   ██████░░░░░░░░░░░░░░░░░ 24%
+  remaining: 153
+  resets on: 2026-08-01
+```
+Free : `0 / 5 lifetime` (pas de reset — les 5 sont à vie, pour essayer).
+
+### `ghost unlocked`
+Skills communautaires débloqués ce cycle : slug, lift mesuré (ou *lift not yet
+measured*), auteur. Triés par lift décroissant, non mesurés en bas. Vide →
+message honnête.
+
+### `ghost earnings`
+Balance de rémunération (50 % du pool, payé au lift × adoption, seuil €50) :
+balance, part d'impact mesuré, installs générés, lift moyen, distance au seuil,
+statut des coordonnées de paiement. Pas encore de gains → message honnête, jamais
+un faux montant.
+
+```
+Earnings  (50% of subscriptions, paid for lift x adoption)
+  balance: €130.50
+  measured impact share this cycle: 100.00%
+  installs your skills generated: 68
+  avg measured lift of your skills: -49%
+  payout threshold: €130.50 / €50.00  — reached
+  payout details: configured
+```
+
+### `ghost account`
+Tableau de bord un écran : email, palier, cycle, résumé usage + earnings, lien
+profil public. Le détail est dans les autres commandes. En Free, montre ce que Pro
+débloquerait, sans être intrusif.
+
+### `ghost history`
+Historique des versements passés (date, montant, statut). Vide → *no payouts yet*.
+
+### `ghost payout-setup`
+Active les versements — **optionnel**, nécessaire seulement pour retirer (pas pour
+contribuer ni gagner de la réputation). N'affiche/collecte **aucune** donnée bancaire
+dans le terminal : ouvre une page sécurisée du backend (lien à usage unique).
+
+### `ghost publish <skill>`
+Publie un skill perso vers la mémoire collective. **Scan de secrets obligatoire**
+(fail-closed) affichant ce qui est masqué, **diff** de ce qui part, confirmation
+explicite. **Privé par défaut** ; `--public` pour entrer dans le registre classé au
+lift. Le lift est mesuré après publication et apparaît dans `ghost earnings`.
+
+```
+Publish demo-skill · visibility: public
+secret scan — masked: {'api_key': 1, 'env_secret': 1, 'email': 1}
+— exactly what will be sent (redacted) —
+  ...export API_KEY=<redacted:env_secret> ... (email <redacted:email>)
+✓ published demo-skill (public)
+```
+
+### `ghost whoami`
+Palier + email/handle courant (debug rapide).
+
 ## Inspection
 
 ### `ghost stats`
