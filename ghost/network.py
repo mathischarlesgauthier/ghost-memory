@@ -13,7 +13,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-DEFAULT_API_BASE = "https://api.ghost-memory.com"
+DEFAULT_API_BASE = "https://ghost-backend-production-f062.up.railway.app"
 TOKEN_FILE = Path.home() / ".ghost" / "ghost_token"
 
 # (method, url, json_body|None, token|None) -> (status_code, parsed_json)
