@@ -598,6 +598,128 @@ def distill(
         console.print(line, style=style, highlight=False)
 
 
+@app.command()
+def create(
+    url: Annotated[
+        str,
+        typer.Argument(
+            metavar="GITHUB_URL",
+            help="Lien vers un skill GitHub (page /blob/… ou lien raw).",
+        ),
+    ],
+    db: DbOpt = DEFAULT_DB,
+    yes: Annotated[bool, typer.Option("--yes", help="Saute la confirmation.")] = False,
+) -> None:
+    """Importe un skill GitHub, le normalise, et l'ajoute à tes skills locaux."""
+    import os
+
+    import anthropic as _anthropic
+
+    from ghost.create import (
+        CreateError,
+        base_slug,
+        create_local_skill,
+        fetch_skill_md,
+        github_license_for_url,
+        normalize_skill,
+        render_skill_md,
+        source_repo_from_url,
+    )
+    from ghost.distill import DEFAULT_SKILLS_DIR, default_caller
+    from ghost.onboard import API_KEY_FILE
+
+    # Clé Anthropic LOCALE : fichier (comme `ghost init`) puis env, sinon → init.
+    key = API_KEY_FILE.read_text(encoding="utf-8").strip() if API_KEY_FILE.exists() else ""
+    key = key or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        ui.fail(
+            console,
+            "aucune clé Anthropic locale",
+            "lance `ghost init` (ou exporte ANTHROPIC_API_KEY)",
+        )
+        raise typer.Exit(1)
+
+    try:
+        with ui.step(console, f"récupération de {url}…"):
+            raw = fetch_skill_md(url)
+    except CreateError as exc:
+        ui.fail(
+            console,
+            f"lien invalide : {exc}",
+            "attendu un fichier de skill sur github.com/…/blob/… ou raw.githubusercontent.com",
+        )
+        raise typer.Exit(1) from exc
+    if not raw.strip():
+        ui.fail(console, "le fichier est vide", "vérifie que le lien pointe bien vers un SKILL.md")
+        raise typer.Exit(1)
+
+    source = source_repo_from_url(url)
+    caller = default_caller(_anthropic.Anthropic(api_key=key))
+    try:
+        with ui.step(console, "normalisation — distillateur (Sonnet 5)…"):
+            lic = github_license_for_url(url)
+            norm = normalize_skill(raw, caller=caller)
+    except CreateError as exc:
+        ui.fail(
+            console,
+            f"normalisation impossible : {exc}",
+            "réessaie, ou vérifie ta clé (`ghost init`)",
+        )
+        raise typer.Exit(1) from exc
+    except _anthropic.APIError as exc:
+        ui.fail(
+            console,
+            f"erreur API : {type(exc).__name__}: {exc}",
+            "vérifie ta clé (`ghost init`) et ta connexion",
+        )
+        raise typer.Exit(1) from exc
+
+    ui.summary(
+        console,
+        f"create · {norm.verdict}",
+        f"{norm.tokens_in} tokens in · {norm.tokens_out} out · {norm.cost_usd:.3f}$",
+        style=ui.OK if norm.verdict == "SKILL" else ui.MUTED,
+    )
+    if norm.verdict == "SKIP":
+        reason = norm.skip_reason or "contenu générique / pas un skill"
+        console.print(ui.verdict("SKIP"))
+        console.print(f"[grey58]raison : {reason}[/grey58]")
+        console.print("[grey58]rien écrit — ce lien n'est pas un skill exploitable.[/grey58]")
+        raise typer.Exit(0)
+
+    skill_md = render_skill_md(norm, source=source, license=lic, raw_md=raw)
+    console.print(ui.verdict("SKILL"))
+    console.print(f"  [bold]{base_slug(norm.name)}[/bold]")
+    console.print(f"  signature de tâche : [grey58]{norm.signature}[/grey58]")
+    if not lic:
+        console.print("  [yellow]⚠ license non détectée sur le dépôt → « unknown »[/yellow]")
+    console.print("\n[dim]— frontmatter généré (le corps d'origine est conservé) —[/dim]")
+    for line in skill_md.splitlines()[:12]:
+        # markup=False : les listes `tags: [a, b]` ne sont pas lues comme du balisage rich.
+        console.print(f"  {line}", markup=False, highlight=False)
+
+    if not yes and not typer.confirm(
+        "\nAjouter ce skill à tes skills locaux ?", default=False
+    ):
+        raise typer.Exit(0)
+
+    conn = connect(db)
+    try:
+        created = create_local_skill(
+            conn, url=url, norm=norm, skill_md=skill_md, skills_dir=DEFAULT_SKILLS_DIR
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    verb = "ré-importé (nouvelle version, ancien désactivé)" if created.reimport else "ajouté"
+    ui.ok(console, f"skill {verb} : {created.slug}")
+    console.print(f"  écrit : {created.path}")
+    console.print(
+        "  visible dans [bold]ghost skills[/bold] · déployable via "
+        "[bold]ghost deploy[/bold] · publiable via [bold]ghost publish[/bold]"
+    )
+
+
 def _set_status(db: Path, candidate: str, status: str) -> None:
     conn = connect(db)
     try:

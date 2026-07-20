@@ -103,14 +103,20 @@ def dominant_task_signature(conn: sqlite3.Connection, candidate_id: int) -> str:
 
     C'est la clé de récupération pour `ghost retrieve` (et le registre), PAS la
     signature de détecteur (`outil|motif`) stockée sur le candidat, qui ne
-    matcherait jamais une signature de tâche. Renvoie "" si le candidat n'a
-    aucune session (rien de fiable à indexer)."""
+    matcherait jamais une signature de tâche.
+
+    Cas import (`ghost create`) : le candidat n'a AUCUNE session mais porte une
+    `task_signature` générée à l'import → on la renvoie telle quelle. Sinon,
+    "" si rien de fiable à indexer."""
     row = conn.execute(
-        "SELECT session_ids_json FROM candidates WHERE id = ?", (candidate_id,)
+        "SELECT session_ids_json, task_signature FROM candidates WHERE id = ?",
+        (candidate_id,),
     ).fetchone()
-    if not row or not row[0]:
+    if not row:
         return ""
-    session_ids = json.loads(str(row[0]))
+    session_ids = json.loads(str(row[0])) if row[0] else []
+    if not session_ids:
+        return str(row[1] or "")  # import : signature générée stockée
     counts = Counter(task_signature(conn, str(sid)) for sid in session_ids)
     if not counts:
         return ""

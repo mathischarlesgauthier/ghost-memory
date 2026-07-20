@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     session_ids_json TEXT NOT NULL DEFAULT '[]',
     evidence_json    TEXT NOT NULL DEFAULT '[]',
     status           TEXT NOT NULL DEFAULT 'new',
+    task_signature   TEXT,
     created_at       TEXT,
     last_seen_at     TEXT,
     UNIQUE(kind, signature)
@@ -157,6 +158,7 @@ def connect(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     # tourné (l'idempotence mtime/sha saute les fichiers inchangés).
     columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
     skills_columns = {row[1] for row in conn.execute("PRAGMA table_info(skills)")}
+    cand_columns = {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
     migrated = False
     for column, present, ddl in (
         ("usage_out", columns, "ALTER TABLE events ADD COLUMN usage_out INTEGER"),
@@ -166,6 +168,9 @@ def connect(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
             "disabled", skills_columns,
             "ALTER TABLE skills ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
         ),
+        # task_signature généré pour les imports `ghost create` (candidat sans
+        # session) : lu par dominant_task_signature → publish/retrieve inchangés.
+        ("task_signature", cand_columns, "ALTER TABLE candidates ADD COLUMN task_signature TEXT"),
     ):
         if column not in present:
             conn.execute(ddl)

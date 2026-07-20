@@ -51,6 +51,33 @@ Candidat → `SKILL.md` (`~/.ghost/skills/<slug>/`). Un appel LLM, section
 Verdict `SKILL` ou `SKIP`. Refuse de créer un doublon si le candidat a déjà un
 skill actif — `--force` régénère (et désactive l'ancien).
 
+### `ghost create <lien-github>`
+Importe un skill **hébergé sur GitHub** et l'ajoute à tes skills locaux, comme un
+distillé maison. Le lien doit pointer vers un fichier de skill existant (page
+`/blob/…` ou lien raw) ; il est récupéré (SSRF-safe : github/raw uniquement, https,
+taille plafonnée), puis passé au distillateur qui **génère le frontmatter manquant**
+(tags, stack, `task_signature`) sans réécrire le corps. L'attribution est lue du
+dépôt : `source` depuis l'URL, `license` via l'API GitHub (« unknown » si
+indéterminée). Utilise ta clé Anthropic locale (`~/.ghost/api_key`), coût affiché
+(~quelques centimes). **Preview avant écriture** : le frontmatter généré, la
+signature de tâche et l'attribution, puis confirmation (`--yes` pour sauter).
+
+Au confirm, le skill est écrit dans `~/.ghost/skills/<slug>/` et enregistré comme
+un distillé : il apparaît dans `ghost skills`, se déploie via `ghost deploy` (global
+par défaut) et se publie via `ghost publish` (retrievable sur sa signature générée).
+Ré-importer le même lien crée une nouvelle version (l'ancienne est désactivée).
+
+```
+$ ghost create https://github.com/obra/superpowers/blob/main/skills/brainstorming/SKILL.md
+```
+
+**SKIP maintenu** : si le contenu est générique/du bruit (README marketing, doc
+d'install, code source brut, pas un vrai skill), il est refusé avec la raison, rien
+n'est écrit. **Échec propre** si le lien n'est pas résoluble en fichier de skill
+(dépôt racine, page `/tree/…`, hôte non-GitHub, fichier vide) — message clair, aucune
+écriture. Ce n'est PAS une publication (ça reste `ghost publish`, privé par défaut),
+ni la distillation d'un repo de code sans skill.
+
 ### `ghost keep <id>` / `ghost reject <id>`
 Valide (déployable) ou rejette (survit aux re-scans, jamais re-proposé) un
 candidat.
