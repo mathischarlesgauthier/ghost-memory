@@ -11,6 +11,7 @@ Réutilisée par le lot 6 (sélection des cas de replay).
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections import Counter
@@ -94,3 +95,24 @@ def task_signature(conn: sqlite3.Connection, session_id: str) -> str:
         "commit" if has_commit else "sans-commit",
     ]
     return "|".join(parts)
+
+
+def dominant_task_signature(conn: sqlite3.Connection, candidate_id: int) -> str:
+    """La `task_signature` la plus fréquente parmi les sessions d'un candidat —
+    la classe de tâche à laquelle le skill appartient.
+
+    C'est la clé de récupération pour `ghost retrieve` (et le registre), PAS la
+    signature de détecteur (`outil|motif`) stockée sur le candidat, qui ne
+    matcherait jamais une signature de tâche. Renvoie "" si le candidat n'a
+    aucune session (rien de fiable à indexer)."""
+    row = conn.execute(
+        "SELECT session_ids_json FROM candidates WHERE id = ?", (candidate_id,)
+    ).fetchone()
+    if not row or not row[0]:
+        return ""
+    session_ids = json.loads(str(row[0]))
+    counts = Counter(task_signature(conn, str(sid)) for sid in session_ids)
+    if not counts:
+        return ""
+    # Fréquence décroissante, puis signature (départage déterministe).
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]

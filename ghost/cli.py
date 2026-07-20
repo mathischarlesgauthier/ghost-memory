@@ -1485,10 +1485,12 @@ def publish(
             console.print(f"[red]SKILL.md introuvable pour {skill.slug}[/red]")
             raise typer.Exit(1)
         raw = skill.source.read_text(encoding="utf-8")
-        row = conn.execute(
-            "SELECT signature FROM candidates WHERE id = ?", (skill.candidate_id,)
-        ).fetchone()
-        signature = str(row[0]) if row and row[0] else ""
+        # Signature de TÂCHE (task_signature) et non la signature de détecteur du
+        # candidat : c'est ce que `ghost retrieve` interroge (même espace que les
+        # seeds). Sinon le skill publié serait introuvable.
+        from ghost.signature import dominant_task_signature
+
+        signature = dominant_task_signature(conn, skill.candidate_id)
     finally:
         conn.close()
 
@@ -1498,6 +1500,13 @@ def publish(
     console.print(
         f"[bold]Publish[/bold] {skill.slug} · visibility: [bold]{visibility}[/bold]"
     )
+    if signature:
+        console.print(f"[grey58]signature de tâche : {signature}[/grey58]")
+    else:
+        console.print(
+            "[yellow]⚠ signature de tâche vide — ce skill ne sera pas trouvable "
+            "par `ghost retrieve` (candidat sans session).[/yellow]"
+        )
     if counts:
         console.print(f"[yellow]secret scan — masked:[/yellow] {counts}")
     else:

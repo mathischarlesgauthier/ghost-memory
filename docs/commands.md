@@ -188,6 +188,10 @@ Publie un skill perso vers la mémoire collective. **Scan de secrets obligatoire
 explicite. **Privé par défaut** ; `--public` pour entrer dans le registre classé au
 lift. Le lift est mesuré après publication et apparaît dans `ghost earnings`.
 
+Le skill est indexé sous la **signature de tâche** dominante de son candidat
+(format `task_signature`, la même qu'interroge `ghost retrieve`) — pas la
+signature de détecteur — pour qu'il soit trouvable quand la tâche correspond.
+
 ```
 Publish demo-skill · visibility: public
 secret scan — masked: {'api_key': 1, 'env_secret': 1, 'email': 1}
