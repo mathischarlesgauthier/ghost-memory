@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -17,11 +16,54 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from ghost import ui
 from ghost.db import DEFAULT_DB, connect
 from ghost.ingest import DEFAULT_ROOT, Summary, ingest_all, scan_files
 
 app = typer.Typer(add_completion=False, help="Ghost Memory — historique Claude Code → SQLite.")
-console = Console()
+console = ui.make_console()
+
+
+@app.callback(invoke_without_command=True)
+def _root(
+    ctx: typer.Context,
+    plain: Annotated[
+        bool,
+        typer.Option(
+            "--plain",
+            help="Sortie plate : sans couleur ni animation (scripts, CI).",
+        ),
+    ] = False,
+    version: Annotated[
+        bool,
+        typer.Option("--version", help="Affiche la version et sort.", is_eager=True),
+    ] = False,
+) -> None:
+    """Ghost Memory — historique Claude Code → SQLite."""
+    global console
+    if plain:
+        ui.force_plain(True)
+        console = ui.make_console()
+    if version:
+        from ghost import __version__
+
+        ui.version_card(console, __version__)
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        # `ghost` sans commande : accueil (une fois) puis l'aide.
+        ui.maybe_welcome(console)
+        console.print(ctx.get_help())
+        raise typer.Exit()
+    # Accueil affiché une seule fois, au premier lancement (jamais avant `welcome`,
+    # jamais dans un pipe/CI, jamais ré-affiché ensuite).
+    if ctx.invoked_subcommand != "welcome":
+        ui.maybe_welcome(console)
+
+
+@app.command()
+def welcome() -> None:
+    """Réaffiche l'écran d'accueil (logo + essence + premières actions)."""
+    ui.welcome(console)
 
 RootOpt = Annotated[Path, typer.Option(help="Racine des projets Claude Code.")]
 DbOpt = Annotated[Path, typer.Option(help="Chemin de la base SQLite.")]
@@ -319,19 +361,23 @@ def scan(db: DbOpt = DEFAULT_DB) -> None:
             "de doute sur ton historique Claude Code)."
         )
         return
-    merged = run_scan(conn)
+    n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    with ui.step(console, f"scan de {n_sessions} sessions — détection des cicatrices…"):
+        merged = run_scan(conn)
     by_kind = {k: sum(1 for c in merged if c.kind == k) for k in
                ("FAILURE_LOOP", "HUMAN_OVERRIDE", "REPEATED_SEQUENCE")}
-    console.print(
-        f"\n[bold]{len(merged)}[/bold] candidats · "
-        f"{by_kind['FAILURE_LOOP']} boucles d'échec · "
+    ui.summary(
+        console,
+        "scan",
+        f"{len(merged)} candidats · {by_kind['FAILURE_LOOP']} boucles d'échec · "
         f"{by_kind['HUMAN_OVERRIDE']} corrections · "
-        f"{by_kind['REPEATED_SEQUENCE']} répétitions\n"
+        f"{by_kind['REPEATED_SEQUENCE']} répétitions",
     )
     rows = conn.execute(
         "SELECT id, kind, signature, score, n_occ, n_sessions, evidence_json, status "
         "FROM candidates ORDER BY score DESC LIMIT 15"
     ).fetchall()
+    blocks: list[str] = []
     for cid, kind, signature, score, n_occ, n_sessions, evidence_json, status in rows:
         label = signature
         if kind == "HUMAN_OVERRIDE":
@@ -339,12 +385,17 @@ def scan(db: DbOpt = DEFAULT_DB) -> None:
             excerpt = str(evidence[0].get("meta", {}).get("excerpt", "")) if evidence else ""
             label = f"{signature}  «{excerpt[:70]}»"
         flag = "" if status == "new" else f" [{status}]"
-        console.print(
+        blocks.append(
             f"  [bold]{cid:4d}[/bold]. [{kind}] {label[:96]}\n"
-            f"        score {score:.1f} · {n_occ} occ · {n_sessions} sess{flag}"
+            f"        [grey58]score {score:.1f} · {n_occ} occ · {n_sessions} sess{flag}[/grey58]"
         )
+    console.print()
+    ui.reveal(console, blocks)  # léger stagger : « il réfléchit », plafonné
     total = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-    console.print(f"\n  top {min(15, int(total))} affichés · {total} candidats en table")
+    console.print(
+        f"\n  [grey58]top {min(15, int(total))} affichés · "
+        f"{total} candidats en table[/grey58]"
+    )
     conn.close()
 
 
@@ -485,9 +536,14 @@ def distill(
                 "existant directement."
             )
             raise typer.Exit(1)
-        result = run_distill(
-            conn, candidate_id, caller=default_caller(_anthropic.Anthropic())
-        )
+        with ui.step(
+            console,
+            f"distillation du candidat {candidate_id} — "
+            "trace → modèle → auto-critique…",
+        ):
+            result = run_distill(
+                conn, candidate_id, caller=default_caller(_anthropic.Anthropic())
+            )
         if result.verdict == "SKILL":
             # Dédup : ne garder actif que le skill le plus récent du candidat.
             keep_id = conn.execute(
@@ -501,21 +557,27 @@ def distill(
             ).rowcount
             conn.commit()
     except (DistillError, RedactionError, ValueError) as exc:
-        console.print(f"[red]échec distillation :[/red] {exc}")
+        ui.fail(console, f"échec distillation : {exc}", "inspecte le candidat : `ghost show <id>`")
         raise typer.Exit(1) from exc
     except _anthropic.APIError as exc:
-        console.print(f"[red]erreur API :[/red] {type(exc).__name__}: {exc}")
+        ui.fail(
+            console,
+            f"erreur API : {type(exc).__name__}: {exc}",
+            "vérifie ta clé (`ghost init`) et ta connexion",
+        )
         raise typer.Exit(1) from exc
     finally:
         conn.close()
 
-    console.print(
-        f"[bold]{result.verdict}[/bold] · {result.tokens_in} tokens in · "
-        f"{result.tokens_out} out · {result.cost_usd:.3f}$ · "
-        f"redactions {result.trace.redactions or 'aucune'}"
+    ui.summary(
+        console,
+        f"distill · {result.verdict}",
+        f"{result.tokens_in} tokens in · {result.tokens_out} out · "
+        f"{result.cost_usd:.3f}$ · redactions {result.trace.redactions or 'aucune'}",
+        style=ui.OK if result.verdict == "SKILL" else ui.MUTED,
     )
     if result.verdict == "SKIP":
-        console.print(f"raison : {result.skip_reason}")
+        console.print(f"[grey58]raison : {result.skip_reason}[/grey58]")
         return
     if superseded:
         console.print(
@@ -679,30 +741,39 @@ def run(
 
     conn = connect(db)
     try:
-        report = run_pipeline(
-            conn, caller=default_caller(_anthropic.Anthropic()),
-            root=root, budget_usd=budget, top_n=top,
-        )
+        with ui.step(console, "ghost run — ingest → scan → distillation sous budget…"):
+            report = run_pipeline(
+                conn, caller=default_caller(_anthropic.Anthropic()),
+                root=root, budget_usd=budget, top_n=top,
+            )
     finally:
         conn.close()
 
-    console.print(
-        f"\n[bold]ghost run[/bold] — {report.n_files_ingested} fichiers ingérés "
-        f"({report.n_files_unchanged} inchangés) · {report.n_candidates_total} candidats · "
-        f"dépense {report.spent_usd:.2f}$ / {budget:.2f}$\n"
+    ui.summary(
+        console,
+        "ghost run",
+        f"{report.n_files_ingested} fichiers ingérés ({report.n_files_unchanged} inchangés) · "
+        f"{report.n_candidates_total} candidats · "
+        f"dépense {report.spent_usd:.2f}$ / {budget:.2f}$",
     )
+    console.print()
+    blocks: list[str] = []
     for item in report.items:
         line = f"  {item.candidate_id:5d} [{item.kind}] {item.signature[:60]}"
         if item.outcome == "SKILL":
-            console.print(f"{line}\n        → SKILL {item.slug} ({item.cost_usd:.3f}$)")
+            blocks.append(
+                f"{line}\n        → [green]SKILL[/green] {item.slug} ({item.cost_usd:.3f}$)"
+            )
         elif item.outcome == "SKIP":
-            console.print(f"{line}\n        → SKIP ({item.cost_usd:.3f}$)")
+            blocks.append(f"{line}\n        → [grey58]SKIP[/grey58] ({item.cost_usd:.3f}$)")
         elif item.outcome == "BUDGET":
-            console.print(f"{line}\n        → non distillé (budget épuisé)")
+            blocks.append(f"{line}\n        → [yellow]non distillé (budget épuisé)[/yellow]")
         else:
-            console.print(f"{line}\n        → [red]ERREUR[/red] {item.error}")
+            blocks.append(f"{line}\n        → [red3]ERREUR[/red3] {item.error}")
+    ui.reveal(console, blocks)
     console.print(
-        "\nTriage : `ghost skills` puis `ghost keep <candidat>` et `ghost deploy`."
+        "\n[grey58]Triage : `ghost skills` puis `ghost keep <candidat>` "
+        "et `ghost deploy`.[/grey58]"
     )
 
 
@@ -786,11 +857,14 @@ def validate(
         )
         if not yes and not typer.confirm("Lancer ?", default=False):
             raise typer.Exit(0)
-        report = run_validation(
-            conn, skill, cases, max_cost_usd=max_cost, n_per_condition=runs,
-            per_run_budget=run_budget,
-            on_progress=lambda msg: console.print(f"  [dim]{msg}[/dim]"),
-        )
+        with ui.step(
+            console, f"replay {skill.slug} — ~{n_runs} runs (avec / sans)…"
+        ) as set_status:
+            report = run_validation(
+                conn, skill, cases, max_cost_usd=max_cost, n_per_condition=runs,
+                per_run_budget=run_budget,
+                on_progress=set_status,
+            )
         for error in report.errors:
             console.print(f"[yellow]⚠ {error}[/yellow]")
         if report.stopped_on_budget:

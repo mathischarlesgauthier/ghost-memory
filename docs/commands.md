@@ -24,6 +24,11 @@ Premier scan… ✓ 29 fichier(s) ingéré(s), N candidat(s) détecté(s).
 Diagnostic d'installation. Chaque `✗` dit quoi faire (PATH, CLI claude,
 historique, base). Sort en erreur s'il manque quelque chose.
 
+### `ghost welcome`
+Réaffiche l'écran d'accueil (logo, essence du produit, 3 premières actions). Il
+s'affiche aussi **une seule fois**, au tout premier lancement (jamais dans un
+pipe ni en `--plain`, jamais ré-affiché ensuite).
+
 ## La boucle
 
 ### `ghost ingest`
@@ -185,3 +190,30 @@ Palier + email/handle courant (debug rapide).
 
 ### `ghost stats`
 Sessions, events, top 10 outils avec taux d'erreur, plage de dates.
+
+## Affichage (couleur, animations, plain)
+
+Ghost a une identité terminal sobre : un logo à l'accueil, des spinners
+discrets qui décrivent l'étape en cours sur les commandes à traitement réel
+(`scan`, `run`, `distill`, `validate`), des résumés encadrés, des verdicts
+colorés (SKILL vert, SKIP gris). **Le style ne ralentit jamais** : les
+animations reflètent le travail, elles ne le bloquent pas, et sont
+interruptibles (Ctrl+C propre).
+
+Tout le décoratif se coupe automatiquement quand il n'a pas lieu d'être :
+
+- **Pas de TTY** (pipe, CI) : sortie plate, aucun code ANSI. Un
+  `ghost stats | cat` ne sort que des données propres ; la progression, elle,
+  part sur **stderr**.
+- **`NO_COLOR`** (variable d'env) : couleur retirée (convention respectée).
+- **`--plain`** (drapeau global) ou **`GHOST_PLAIN=1`** (variable d'env) :
+  désactivent *tout* le décoratif — couleur ET animations — pour les scripts et
+  les gens pressés.
+- **Terminal étroit** (<80 colonnes) : le logo se réduit ou se masque, rien ne
+  casse.
+
+```
+ghost --plain scan          # sortie plate, sans couleur ni spinner
+GHOST_PLAIN=1 ghost run     # idem, via variable d'environnement
+ghost stats | cat           # pipe : données propres, zéro ANSI
+```
