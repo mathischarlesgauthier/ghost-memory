@@ -122,6 +122,19 @@ jeton déjà créé sur le web.
 ### `ghost logout`
 Supprime le jeton Ghost local.
 
+### `ghost retrieve [SIGNATURE]`
+Cherche dans la **mémoire collective** les skills d'une classe de tâche :
+slug, lift mesuré (ou *non mesuré*), statut, source/auteur. Métadonnées seules —
+le corps se débloque séparément (Pro). Classé par lift mesuré ; les seeds non
+mesurés suivent. Sans argument, la signature est déduite de ta **dernière
+session locale** (`--session <id>` pour en choisir une). Vide → message honnête.
+
+```
+$ ghost retrieve "bash-alembic-upgrade+edit|py|duplicatecolumn|commit"
+1 skill(s) pour cette classe de tâche
+  alembic-idempotent-migrations · non mesuré · unverified ·seed · github.com/…
+```
+
 ### `ghost usage`
 Consommation du cycle : palier, déblocages utilisés / quota, reset, barre de
 progression. Alerte + suggestion d'upgrade au-delà de 80 %. Un déblocage = 1ᵉʳ ajout
