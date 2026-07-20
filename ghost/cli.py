@@ -1270,6 +1270,102 @@ def login(
 
 
 @app.command()
+def retrieve(
+    signature: Annotated[
+        str | None,
+        typer.Argument(
+            help="Signature de tâche. Défaut : calculée depuis ta dernière session locale."
+        ),
+    ] = None,
+    db: DbOpt = DEFAULT_DB,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", help="Calcule la signature depuis cette session locale."),
+    ] = None,
+    limit: Annotated[int, typer.Option(help="Nombre de skills remontés.")] = 10,
+    api_url: ApiUrlOpt = None,
+) -> None:
+    """Cherche dans la mémoire collective les skills d'une classe de tâche.
+
+    Métadonnées seules, classées par lift mesuré (les seeds non mesurés suivent).
+    Sans argument, la signature est déduite de ta dernière session locale."""
+    from ghost.network import NetworkError, api_base, load_token
+    from ghost.network import retrieve as net_retrieve
+    from ghost.signature import task_signature
+
+    token = load_token()
+    if not token:
+        ui.fail(console, "pas connecté au réseau", "connecte-toi : `ghost login`")
+        raise typer.Exit(1)
+
+    sig = signature
+    if sig is None:
+        conn = connect(db)
+        try:
+            sid = session
+            if sid is None:
+                row = conn.execute(
+                    "SELECT id FROM sessions "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    ui.fail(
+                        console,
+                        "aucune session locale pour déduire une signature",
+                        "ingère ton historique (`ghost ingest`) ou passe une signature en argument",
+                    )
+                    raise typer.Exit(1)
+                sid = str(row[0])
+            sig = task_signature(conn, sid)
+        finally:
+            conn.close()
+        console.print(f"[grey58]signature : {sig}[/grey58]")
+
+    base = api_url or api_base()
+    try:
+        with ui.step(console, "interrogation de la mémoire collective…"):
+            data = net_retrieve(sig, token, limit=limit, base=base)
+    except NetworkError as exc:
+        ui.fail(console, str(exc), "réessaie quand le réseau répond")
+        raise typer.Exit(1) from exc
+
+    raw = data.get("skills")
+    skills = [s for s in raw if isinstance(s, dict)] if isinstance(raw, list) else []
+    if not skills:
+        msg = data.get("message") or "rien pour cette signature — la mémoire se remplit."
+        console.print(f"\n[grey58]{msg}[/grey58]")
+        return
+
+    ui.summary(console, "retrieve", f"{len(skills)} skill(s) pour cette classe de tâche")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("skill")
+    table.add_column("lift", justify="right")
+    table.add_column("statut")
+    table.add_column("source / auteur")
+    for s in skills:
+        lift = s.get("mean_lift")
+        lift_txt = (
+            f"{lift * 100:+.0f}%"
+            if isinstance(lift, int | float)
+            else "[grey58]non mesuré[/grey58]"
+        )
+        status_txt = (
+            "[green]verified[/green]"
+            if s.get("status") == "verified"
+            else "[grey58]unverified[/grey58]"
+        )
+        if s.get("seed"):
+            status_txt += " [#7fb0ff]·seed[/#7fb0ff]"
+        src = str(s.get("source") or s.get("author") or "—")
+        table.add_row(str(s.get("slug")), lift_txt, status_txt, src)
+    console.print(table)
+    console.print(
+        "\n[grey58]classé par lift mesuré ; les non mesurés (seeds) suivent · "
+        "corps via déblocage (Pro).[/grey58]"
+    )
+
+
+@app.command()
 def logout() -> None:
     """Supprime le jeton Ghost local."""
     from ghost.network import clear_token

@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlencode
 
 DEFAULT_API_BASE = "https://ghost-backend-production-f062.up.railway.app"
 TOKEN_FILE = Path.home() / ".ghost" / "ghost_token"
@@ -140,6 +141,27 @@ def device_login(
             continue
         raise NetworkError(f"login échoué ({status}): {resp.get('detail')}")
     raise NetworkError("délai de login dépassé — relance `ghost login`")
+
+
+def retrieve(
+    signature: str,
+    token: str,
+    *,
+    limit: int = 10,
+    base: str | None = None,
+    http: Http = _urllib_http,
+) -> dict[str, object]:
+    """Skills communautaires pour une signature de tâche — métadonnées seules
+    (jamais le corps). Le corps se débloque séparément (quota Pro)."""
+    query = urlencode({"signature": signature, "limit": limit})
+    status, resp = http(
+        "GET", f"{base or api_base()}/registry/retrieve?{query}", None, token
+    )
+    if status == 401:
+        raise NetworkError("jeton invalide — relance `ghost login`")
+    if status != 200:
+        raise NetworkError(f"retrieve échoué ({status}) : {resp.get('detail')}")
+    return resp
 
 
 def checkout_url(

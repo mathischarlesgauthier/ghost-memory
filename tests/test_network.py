@@ -12,6 +12,7 @@ from ghost.network import (
     clear_token,
     device_login,
     load_token,
+    retrieve,
     save_token,
 )
 
@@ -79,3 +80,29 @@ def test_checkout_url_raises_when_unconfigured() -> None:
 
     with pytest.raises(NetworkError, match="Stripe non configuré"):
         checkout_url("pro", "t", base="https://api", http=http)  # type: ignore[arg-type]
+
+
+def test_retrieve_builds_query_and_parses() -> None:
+    seen: dict[str, object] = {}
+
+    def http(method: str, url: str, body: object, token: object) -> tuple[int, dict]:
+        seen.update(method=method, url=url, token=token)
+        return 200, {
+            "skills": [{"slug": "x", "mean_lift": None, "status": "unverified", "seed": True}],
+            "message": None,
+        }
+
+    resp = retrieve("bash|py|err|commit", "tok", limit=5, base="https://api.test", http=http)
+    assert seen["method"] == "GET"
+    assert "/registry/retrieve?" in str(seen["url"])
+    assert "signature=bash" in str(seen["url"]) and "limit=5" in str(seen["url"])
+    assert seen["token"] == "tok"
+    assert resp["skills"][0]["slug"] == "x"  # type: ignore[index]
+
+
+def test_retrieve_401_raises() -> None:
+    def http(method: str, url: str, body: object, token: object) -> tuple[int, dict]:
+        return 401, {"detail": "nope"}
+
+    with pytest.raises(NetworkError):
+        retrieve("s", "tok", base="https://api.test", http=http)
