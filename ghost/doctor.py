@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ghost.db import DEFAULT_DB
 from ghost.ingest import DEFAULT_ROOT
-from ghost.replay import API_KEY_FILE
+from ghost.onboard import API_KEY_FILE
 
 GLOBAL_SKILLS_DIR = Path.home() / ".claude" / "skills"
 

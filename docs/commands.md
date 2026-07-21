@@ -12,6 +12,11 @@ validée par un ping sans coût), détecte Claude Code + ton historique, puis la
 un premier scan et affiche tes candidats. Ne plante jamais sur une machine
 vierge : chaque absence donne une consigne.
 
+La clé enregistrée (`~/.ghost/api_key`) est la **source de vérité** pour toutes
+les commandes qui appellent l'API (`distill`, `run`, `create`, `validate`,
+`bench`), avec `ANTHROPIC_API_KEY` en secours. Sans clé : message clair
+(« lance `ghost init` »), jamais un traceback SDK.
+
 ```
 $ ghost init
 ✓ `ghost` est sur le PATH.
@@ -110,6 +115,13 @@ baseline sans skill réussit vraiment (>50 %) → un lift veut dire quelque chos
 Rejoue des tâches de ton historique avec/sans le skill (quand des cas courts et
 auto-contenus existent). Protocole alterné, budget dur, reprise possible. Runs
 coupés par le budget/timeout = catégorie distincte, jamais comptés comme échec.
+
+Exige **≥ 3 cas éligibles** (refus sinon, comptes d'exclusion affichés).
+`--allow-underpowered` (mode debug) rejoue quand même sous le seuil : la
+mécanique tourne de bout en bout (baseline reconstruite, agent lancé sans/avec,
+comparaison), mais le résultat est marqué **NON STATISTIQUEMENT VALIDE** et
+n'est écrit ni dans le SKILL.md ni en base — les runs restent réutilisables si
+tu relances plus tard avec assez de cas.
 
 ### `ghost watch`
 Signal précoce sans inférence : sessions exposées à un skill vs baseline.

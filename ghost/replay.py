@@ -35,8 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ghost.deploy import convert_for_claude_code
+from ghost.onboard import ApiKeyMissing, resolve_api_key
 
-API_KEY_FILE = Path.home() / ".ghost" / "api_key"
 REPLAY_MODEL = "claude-sonnet-5"
 RUN_TIMEOUT_S = 900
 PER_RUN_BUDGET_USD = 0.60
@@ -218,7 +218,10 @@ def run_replay(
             "et tuer proprement les processus de replay. Sur Windows natif, utilise "
             "WSL. Les autres commandes (ingest/scan/distill/deploy) fonctionnent."
         )
-    api_key = API_KEY_FILE.read_text(encoding="utf-8").strip()
+    try:
+        api_key = resolve_api_key()  # ~/.ghost/api_key (ghost init) puis env
+    except ApiKeyMissing as exc:
+        raise ReplayError(str(exc)) from exc
     cfg = Path(tempfile.mkdtemp(prefix="ghost-replay-cfg-"))
     try:
         base_commit = _git(work, "rev-parse", "HEAD")

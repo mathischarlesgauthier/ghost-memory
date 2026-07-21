@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    import anthropic
 
 import typer
 from rich.progress import (
@@ -96,6 +99,27 @@ def _resolve_candidate_id(conn: sqlite3.Connection, token: str) -> int:
     if r.note:
         console.print(f"[dim]{r.note}[/dim]")
     return r.id
+
+
+def _anthropic_client() -> anthropic.Anthropic:
+    """Client Anthropic authentifié par la clé LOCALE : ~/.ghost/api_key (écrit
+    par `ghost init`, source de vérité) puis ANTHROPIC_API_KEY. Sort proprement
+    si aucune — jamais le traceback SDK « Could not resolve authentication
+    method »."""
+    import anthropic as _anthropic
+
+    from ghost.onboard import ApiKeyMissing, resolve_api_key
+
+    try:
+        key = resolve_api_key()
+    except ApiKeyMissing as exc:
+        ui.fail(
+            console,
+            "aucune clé Anthropic locale",
+            "lance `ghost init` (ou exporte ANTHROPIC_API_KEY)",
+        )
+        raise typer.Exit(1) from exc
+    return _anthropic.Anthropic(api_key=key)
 
 
 @app.command()
@@ -536,13 +560,14 @@ def distill(
                 "existant directement."
             )
             raise typer.Exit(1)
+        client = _anthropic_client()  # clé locale (~/.ghost/api_key) puis env
         with ui.step(
             console,
             f"distillation du candidat {candidate_id} — "
             "trace → modèle → auto-critique…",
         ):
             result = run_distill(
-                conn, candidate_id, caller=default_caller(_anthropic.Anthropic())
+                conn, candidate_id, caller=default_caller(client)
             )
         if result.verdict == "SKILL":
             # Dédup : ne garder actif que le skill le plus récent du candidat.
@@ -611,8 +636,6 @@ def create(
     yes: Annotated[bool, typer.Option("--yes", help="Saute la confirmation.")] = False,
 ) -> None:
     """Importe un skill GitHub, le normalise, et l'ajoute à tes skills locaux."""
-    import os
-
     import anthropic as _anthropic
 
     from ghost.create import (
@@ -626,18 +649,10 @@ def create(
         source_repo_from_url,
     )
     from ghost.distill import DEFAULT_SKILLS_DIR, default_caller
-    from ghost.onboard import API_KEY_FILE
 
-    # Clé Anthropic LOCALE : fichier (comme `ghost init`) puis env, sinon → init.
-    key = API_KEY_FILE.read_text(encoding="utf-8").strip() if API_KEY_FILE.exists() else ""
-    key = key or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        ui.fail(
-            console,
-            "aucune clé Anthropic locale",
-            "lance `ghost init` (ou exporte ANTHROPIC_API_KEY)",
-        )
-        raise typer.Exit(1)
+    # Clé Anthropic LOCALE (fichier `ghost init` puis env) — résolue avant tout
+    # accès réseau pour échouer vite et clairement.
+    caller = default_caller(_anthropic_client())
 
     try:
         with ui.step(console, f"récupération de {url}…"):
@@ -654,7 +669,6 @@ def create(
         raise typer.Exit(1)
 
     source = source_repo_from_url(url)
-    caller = default_caller(_anthropic.Anthropic(api_key=key))
     try:
         with ui.step(console, "normalisation — distillateur (Sonnet 5)…"):
             lic = github_license_for_url(url)
@@ -856,16 +870,15 @@ def run(
     top: Annotated[int, typer.Option(help="Nb max de nouveaux candidats distillés.")] = 10,
 ) -> None:
     """Boucle complète : ingest → scan → distille les nouveaux candidats."""
-    import anthropic as _anthropic
-
     from ghost.distill import default_caller
     from ghost.pipeline import run_pipeline
 
+    client = _anthropic_client()  # clé locale (~/.ghost/api_key) puis env
     conn = connect(db)
     try:
         with ui.step(console, "ghost run — ingest → scan → distillation sous budget…"):
             report = run_pipeline(
-                conn, caller=default_caller(_anthropic.Anthropic()),
+                conn, caller=default_caller(client),
                 root=root, budget_usd=budget, top_n=top,
             )
     finally:
@@ -937,6 +950,15 @@ def validate(
     run_budget: Annotated[
         float, typer.Option(help="Plafond --max-budget-usd par run.")
     ] = 0.60,
+    allow_underpowered: Annotated[
+        bool,
+        typer.Option(
+            "--allow-underpowered",
+            help="Mode debug : rejoue même sous le seuil de 3 cas. Le résultat "
+            "est marqué NON STATISTIQUEMENT VALIDE et n'est écrit ni dans le "
+            "SKILL.md ni dans lift_json.",
+        ),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Saute la confirmation.")] = False,
 ) -> None:
     """Valide un skill par replay contrôlé avec/sans (chiffre causal)."""
@@ -945,6 +967,7 @@ def validate(
     from ghost.replay import ReplayError
     from ghost.validate import (
         EST_COST_PER_RUN,
+        MIN_CASES,
         aggregate,
         eligible_cases,
         rank_cases_by_motif,
@@ -964,12 +987,29 @@ def validate(
                 f"[dim]{max_cases} cas retenus (les plus probants par motif "
                 f"d'erreur du skill)[/dim]"
             )
-        if len(cases) < 3:
+        underpowered = len(cases) < MIN_CASES
+        if underpowered and not allow_underpowered:
             console.print(
-                f"[red]{len(cases)} cas éligibles (<3) — refus, conformément au "
-                f"protocole.[/red] Comptes : {counts}"
+                f"[red]{len(cases)} cas éligibles (<{MIN_CASES}) — refus, conformément au "
+                f"protocole.[/red] Comptes : {counts}\n"
+                "[dim]Debug : --allow-underpowered lance quand même la mécanique "
+                "(résultat non statistiquement valide).[/dim]"
             )
             raise typer.Exit(1)
+        if not cases:
+            console.print(
+                f"[red]0 cas éligible — rien à rejouer, même avec "
+                f"--allow-underpowered.[/red] Comptes : {counts}"
+            )
+            raise typer.Exit(1)
+        if underpowered:
+            console.print(
+                f"[bold yellow]⚠ MODE DEBUG — {len(cases)} cas (<{MIN_CASES}) : "
+                "résultat NON STATISTIQUEMENT VALIDE.[/bold yellow]\n"
+                "[yellow]Ce run sert uniquement à vérifier la plomberie (baseline "
+                "reconstruite, agent lancé sans/avec skill, comparaison) ; rien ne "
+                "sera écrit dans le SKILL.md ni dans lift_json.[/yellow]"
+            )
         n_runs = len(cases) * 2 * runs
         estimate = n_runs * EST_COST_PER_RUN
         console.print(
@@ -1012,8 +1052,13 @@ def validate(
             for condition in ("sans", "avec"):
                 vals = " / ".join(conds.get(condition, []))
                 console.print(f"    {condition:<5} turns: {vals or '—'}")
+        debug_tag = (
+            f"[bold yellow]NON STATISTIQUEMENT VALIDE (debug, n<{MIN_CASES})[/bold yellow] · "
+            if underpowered
+            else ""
+        )
         console.print(
-            f"\n╭─ [bold]{lift.verdict.upper()}[/bold]\n"
+            f"\n╭─ {debug_tag}[bold]{lift.verdict.upper()}[/bold]\n"
             f"│  succès sans {lift.success_sans[0]}/{lift.success_sans[1]} → "
             f"avec {lift.success_avec[0]}/{lift.success_avec[1]}\n"
             f"│  n={lift.n_cases} cas · {lift.n_runs} runs · coût {lift.cost_usd:.2f}$\n"
@@ -1026,6 +1071,13 @@ def validate(
                 f"   {entry.metric:<13} sans {entry.baseline_median:.0f} → "
                 f"avec {entry.exposed_median:.0f}  ({pct}, {coherent})"
             )
+        if underpowered:
+            console.print(
+                "\n[yellow]mode debug : lift NON STATISTIQUEMENT VALIDE — "
+                "non écrit dans le SKILL.md ni dans lift_json (les runs restent "
+                "en base et compteront si tu relances avec assez de cas).[/yellow]"
+            )
+            return
         conn.execute(
             "UPDATE skills SET lift_json = ? WHERE id = ?",
             (

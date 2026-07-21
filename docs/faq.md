@@ -46,6 +46,11 @@ tes sessions sont de grosses missions, il n'y en a pas — utilise alors
 `ghost bench <skill>`, qui mesure sur des micro-benchmarks synthétiques avec une
 baseline garantie. Voir [Comment ça marche](how-it-works.md).
 
+Pour juste **voir le harnais tourner** avec 1 ou 2 cas (repo solo) :
+`ghost validate <skill> --allow-underpowered`. Le replay s'exécute en entier
+mais le résultat est marqué NON STATISTIQUEMENT VALIDE et n'est pas persisté —
+c'est un mode debug, pas une mesure.
+
 ## `291 est un candidat avec plusieurs skills…`
 
 Tu as passé un id de candidat à une commande qui attend un skill, et ce candidat

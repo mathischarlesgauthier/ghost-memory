@@ -149,7 +149,7 @@ and tells you how (no more "not a valid int").
 | Command | What it does |
 |---|---|
 | `ghost bench <skill>` | Measure lift on synthetic micro-benchmarks (deterministic grader, a baseline that actually works). |
-| `ghost validate <skill>` | Replay real history tasks with/without the skill. Budget/timeout cuts are a separate category, never failures. |
+| `ghost validate <skill>` | Replay real history tasks with/without the skill. Needs ≥3 eligible cases; `--allow-underpowered` runs the mechanics anyway (marked not statistically valid, nothing persisted). Budget/timeout cuts are a separate category, never failures. |
 | `ghost watch` | Early exposure signal (sessions with vs without a skill). |
 
 ### Control & privacy
@@ -248,7 +248,9 @@ can argue with. Full details: [ghostskills.com/earn](https://ghostskills.com/ear
 
 Everything lives in `~/.ghost/` (dir `0700`, db `0600`). `ingest`, `scan`,
 `show`, `skills`, `deploy` touch **nothing** on the network. Only
-`distill` / `validate` / `bench` call the Anthropic API, with **your** key.
+`distill` / `run` / `create` / `validate` / `bench` call the Anthropic API, with
+**your** key — read from `~/.ghost/api_key` (written by `ghost init`), falling
+back to `ANTHROPIC_API_KEY`.
 
 **Redaction before any send — fail closed.** Before a trace leaves for
 distillation (or a skill is published) it passes a fail-closed redactor: when in

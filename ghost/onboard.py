@@ -41,6 +41,27 @@ def write_api_key(key: str, path: Path = API_KEY_FILE) -> Path:
     return path
 
 
+class ApiKeyMissing(RuntimeError):
+    """Aucune clé Anthropic locale : ni ~/.ghost/api_key, ni ANTHROPIC_API_KEY."""
+
+
+def resolve_api_key() -> str:
+    """Clé Anthropic locale : le fichier écrit par `ghost init` d'abord (source
+    de vérité), sinon ANTHROPIC_API_KEY. Lève ApiKeyMissing avec la consigne —
+    jamais laisser le SDK planter en « Could not resolve authentication method »."""
+    if API_KEY_FILE.exists():
+        key = API_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if key:
+        return key
+    raise ApiKeyMissing(
+        f"clé Anthropic introuvable ({API_KEY_FILE} absent, ANTHROPIC_API_KEY "
+        "non défini) — lance `ghost init`"
+    )
+
+
 @dataclass(slots=True)
 class HistoryStatus:
     projects_exist: bool

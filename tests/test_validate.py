@@ -307,3 +307,105 @@ def test_write_lift_frontmatter(tmp_path: Path) -> None:
     # Idempotent : ré-écriture remplace, pas d'accumulation.
     write_lift_frontmatter(md, report)
     assert md.read_text(encoding="utf-8").count("lift:") == 1
+
+
+# --------------------------------------------------------------------------
+# CLI : seuil MIN_CASES et --allow-underpowered (mode debug)
+
+
+def _cli_case(repo: Path) -> ReplayCase:
+    return ReplayCase(
+        case_id="cas00001", session_id="cas00001-full", prompt="corrige pay",
+        repo=repo, base_commit="HEAD~1", head_end="deadbee", signature="sig",
+    )
+
+
+def _invoke_validate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cases: list[ReplayCase],
+    *extra_args: str,
+) -> tuple[object, Path, list[object]]:
+    """Invoque `ghost validate` avec la sélection de cas et le runner mockés —
+    on teste le SEUIL et le marquage, pas le replay lui-même."""
+    from typer.testing import CliRunner
+
+    import ghost.resolve as resolve_mod
+    import ghost.validate as validate_mod
+    from ghost.cli import app
+    from ghost.resolve import Resolved
+    from ghost.validate import SkillInfo, ValidationReport
+
+    md = tmp_path / "SKILL.md"
+    md.write_text(
+        "---\nname: sk\ndescription: t.\n---\n\n## Quand utiliser\nY.\n",
+        encoding="utf-8",
+    )
+    ran: list[object] = []
+
+    def fake_run_validation(
+        _conn: object, skill: SkillInfo, run_cases: list[ReplayCase], **_kw: object
+    ) -> ValidationReport:
+        ran.append(run_cases)
+        return ValidationReport(skill_id=skill.skill_id, slug=skill.slug)
+
+    monkeypatch.setattr(resolve_mod, "resolve_skill", lambda _c, _t: Resolved(id=1))
+    monkeypatch.setattr(
+        validate_mod, "skill_info",
+        lambda _c, _i: SkillInfo(skill_id=1, slug="sk", source=md, candidate_id=1),
+    )
+    monkeypatch.setattr(
+        validate_mod, "eligible_cases",
+        lambda _c, _s, match: (cases, {"sessions_examinees": 5}),
+    )
+    monkeypatch.setattr(validate_mod, "run_validation", fake_run_validation)
+    result = CliRunner().invoke(
+        app, ["validate", "1", "--yes", "--db", str(tmp_path / "g.db"), *extra_args]
+    )
+    return result, md, ran
+
+
+def test_validate_refuses_below_min_cases_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _md, ran = _invoke_validate(tmp_path, monkeypatch, [_cli_case(tmp_path)])
+    assert result.exit_code == 1
+    assert "refus" in result.output
+    assert "--allow-underpowered" in result.output  # la porte de sortie est indiquée
+    assert ran == []  # rien n'a tourné
+
+
+def test_validate_allow_underpowered_zero_cases_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _md, ran = _invoke_validate(
+        tmp_path, monkeypatch, [], "--allow-underpowered"
+    )
+    assert result.exit_code == 1
+    assert "0 cas" in result.output
+    assert ran == []
+
+
+def test_validate_allow_underpowered_runs_marks_and_persists_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, md, ran = _invoke_validate(
+        tmp_path, monkeypatch, [_cli_case(tmp_path)], "--allow-underpowered"
+    )
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1  # la mécanique a bien tourné (1 cas)
+    assert "NON STATISTIQUEMENT VALIDE" in result.output
+    # Rien d'écrit dans le SKILL.md : pas de ligne lift dans le frontmatter.
+    assert "lift:" not in md.read_text(encoding="utf-8")
+
+
+def test_validate_at_threshold_still_persists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases = [_cli_case(tmp_path) for _ in range(3)]
+    result, md, ran = _invoke_validate(tmp_path, monkeypatch, cases)
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1
+    assert "NON STATISTIQUEMENT VALIDE" not in result.output
+    # Le chemin nominal écrit toujours le lift dans le frontmatter.
+    assert "lift:" in md.read_text(encoding="utf-8")
